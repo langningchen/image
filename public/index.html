@@ -28,6 +28,9 @@
             <input type="file" class="form-control" id="upFile" multiple>
             <button class="btn btn-primary" id="upButton" disabled>Upload</button>
         </div>
+        <div class="progress mb-3">
+            <div class="progress-bar" id="uploadProgress" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+        </div>
         <div id="imageContainer" class="d-flex flex-wrap"></div>
         <pre></pre>
     </div>
@@ -65,18 +68,39 @@
             imageContainer.appendChild(card);
         };
 
-        const upload = async (dataUrl) => {
+        const upload = async (dataUrl, index, totalFiles) => {
             const reader = new FileReader();
             reader.readAsDataURL(dataUrl);
             return new Promise((resolve, reject) => {
                 reader.onload = async () => {
-                    const imageID = await fetch("/upload", { body: reader.result, method: "POST", }).then(r => r.text());
-                    if (!imageID) { reject(); }
-                    else {
-                        await addImage(imageID);
-                        localStorage.setItem("images", [localStorage.getItem("images"), imageID].filter(Boolean).join(","));
-                        resolve();
-                    }
+                    const formData = new FormData();
+                    formData.append("file", dataUrl);
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("POST", "/upload", true);
+                    xhr.upload.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            const percentComplete = (event.loaded / event.total) * 100;
+                            document.getElementById("uploadProgress").style.width = `${percentComplete}%`;
+                            document.getElementById("uploadProgress").setAttribute("aria-valuenow", percentComplete);
+                        }
+                    };
+                    xhr.onload = async () => {
+                        if (xhr.status === 200) {
+                            const imageID = xhr.responseText;
+                            if (!imageID) { reject(); }
+                            else {
+                                await addImage(imageID);
+                                localStorage.setItem("images", [localStorage.getItem("images"), imageID].filter(Boolean).join(","));
+                                resolve();
+                            }
+                        } else {
+                            reject();
+                        }
+                    };
+                    xhr.onerror = () => {
+                        reject();
+                    };
+                    xhr.send(formData);
                 };
             });
         };
@@ -87,11 +111,16 @@
         upButton.addEventListener("click", async () => {
             upButton.disabled = true;
             upButton.innerText = "Uploading...";
-            for (let i = 0; i < upFile.files.length; i++) {
-                await upload(upFile.files[i]);
+            const totalFiles = upFile.files.length;
+            const uploadPromises = [];
+            for (let i = 0; i < totalFiles; i++) {
+                uploadPromises.push(upload(upFile.files[i], i, totalFiles));
             }
+            await Promise.all(uploadPromises);
             upFile.value = "";
             upButton.innerText = "Upload";
+            document.getElementById("uploadProgress").style.width = "0%";
+            document.getElementById("uploadProgress").setAttribute("aria-valuenow", 0);
         });
 
         window.addEventListener("paste", async (EventData) => {
