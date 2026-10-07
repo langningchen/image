@@ -66,12 +66,12 @@ const App: React.FC = () => {
         <Divider sx={{ mb: 3 }} />
         
         <Box sx={{ mb: 3 }}>
-          <Typography variant="body1" paragraph>
+          <Typography variant="body1" component="p" sx={{ mb: 2 }}>
             This is an image hosting service.
             Just paste in your image or select your image below, and you will get a URL in a few seconds!
           </Typography>
           
-          <Typography variant="body1" paragraph>
+          <Typography variant="body1" component="p" sx={{ mb: 2 }}>
             This project is created by{' '}
             <Link href="https://github.com/langningchen" target="_blank" rel="noopener">
               Langning Chen

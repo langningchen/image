@@ -2,3 +2,10 @@
 .wrangler/
 node_modules/
 worker-configuration.d.ts
+dist/
+wrangler.deploy.jsonc
+.env*
+!.env.example
+kv-export*.json
+kv-import*.sql
+*.tsbuildinfo

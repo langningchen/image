@@ -46,7 +46,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d')!;
       const img = new Image();
-      
+
       img.onload = () => {
         // Calculate new dimensions (max 1920px width)
         let { width, height } = img;
@@ -55,15 +55,15 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
           height = (height * maxWidth) / width;
           width = maxWidth;
         }
-        
+
         canvas.width = width;
         canvas.height = height;
         ctx.drawImage(img, 0, 0, width, height);
-        
+
         // Compress and return
         resolve(canvas.toDataURL('image/jpeg', quality));
       };
-      
+
       img.src = dataUrl;
     });
   }, []);
@@ -78,19 +78,19 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
           if (file.size > 1024 * 1024) { // If larger than 1MB
             imageData = await compressImage(imageData, 0.8);
           }
-          
-          const response = await fetch('/upload', { 
-            body: imageData, 
+
+          const response = await fetch('/upload', {
+            body: imageData,
             method: 'POST',
             headers: {
               'Content-Type': 'text/plain'
             }
           });
-          
+
           const imageId = await response.text();
-          
-          if (!imageId) { 
-            reject(new Error('Upload failed')); 
+
+          if (!response.ok || !/^[a-z]{32}$/.test(imageId)) {
+            reject(new Error('Upload failed'));
           } else {
             resolve(imageId);
           }
@@ -114,7 +114,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
     try {
       const fileArray = Array.from(files);
       const totalFiles = fileArray.length;
-      
+
       // Upload files in parallel
       const uploadPromises = fileArray.map(async (file, index) => {
         const imageId = await uploadFile(file);
@@ -124,7 +124,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       });
 
       await Promise.all(uploadPromises);
-      
+
       setSuccess(`Successfully uploaded ${totalFiles} file(s)!`);
       setTimeout(() => setSuccess(null), 3000);
     } catch (error) {
@@ -149,7 +149,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
   const handleDrop = (event: React.DragEvent) => {
     event.preventDefault();
     setDragOver(false);
-    
+
     if (event.dataTransfer.files) {
       handleUpload(event.dataTransfer.files);
     }
@@ -204,7 +204,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
         accept="image/*"
         onChange={handleFileSelect}
       />
-      
+
       <UploadBox
         className={dragOver ? 'dragover' : ''}
         onClick={handleClick}
@@ -220,10 +220,10 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
         <Typography variant="body2" color="text.secondary">
           Click to select files, drag & drop, or paste images
         </Typography>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
           Uploaded images are automatically deleted after 7 days without being accessed.
         </Typography>
-        
+
         {uploading && (
           <Box sx={{ mt: 2, width: '100%' }}>
             <LinearProgress variant="determinate" value={uploadProgress} />

@@ -112,7 +112,7 @@ const ImageGallery: React.FC<ImageGalleryProps> = ({ images, onImageDeleted }) =
     <Box>
       <Grid container spacing={3}>
         {images.map((imageId) => (
-          <Grid width={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={imageId}>
+          <Grid size={{ xs: 12, sm: 6, md: 4, lg: 3 }} key={imageId}>
             <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
               <CardMedia
                 component="img"

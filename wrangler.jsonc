@@ -1,0 +1,33 @@
+// Shared local configuration. Real resource IDs are injected by scripts/wrangler.mjs.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "image",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./dist",
+    "run_worker_first": [
+      "/upload"
+    ]
+  },
+  "placement": {
+    "mode": "smart"
+  },
+  "triggers": {
+    "crons": [
+      "45 3 * * *"
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "image-access",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": false
+  }
+}

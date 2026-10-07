@@ -1,6 +1,6 @@
 // Service Worker for aggressive caching of static assets and images
 const CACHE_NAME = 'image-host-v1';
-const STATIC_CACHE = 'static-v1';
+const STATIC_CACHE = 'static-v2';
 
 // Files to cache immediately
 const STATIC_ASSETS = [
