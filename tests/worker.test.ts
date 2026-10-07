@@ -362,3 +362,51 @@ test('retention distribution handles expiry boundaries and counts all images bey
     assert.equal(images.images.length, 50);
     assert.equal(overview.retention.total, 66);
 });
+
+test('PNG and WebP uploads preserve bytes, file extensions and response MIME types', async t => {
+    const { env, ctx, pending } = fixture();
+    const stored = new Map<string, string>();
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        const path = new URL(url).pathname.split('/').at(-1)!;
+        if (init?.method === 'PUT') {
+            stored.set(path, JSON.parse(String(init.body)).content);
+            return Response.json({ content: { name: path } });
+        }
+        const bytes = stored.get(path);
+        return bytes ? new Response(Buffer.from(bytes, 'base64')) : new Response(null, { status: 404 });
+    });
+    // A transparent one-pixel PNG must survive the complete storage round trip.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
+    for (const [extension, bytes] of [['png', png], ['webp', 'UklGRg==']]) {
+        const upload = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', body: `data:image/${extension};base64,${bytes}` }), env, ctx);
+        assert.equal(upload.status, 200);
+        const imageId = await upload.text();
+        assert.equal(stored.get(`${imageId}.${extension}`), bytes);
+        const image = await worker.fetch(new Request(`https://image.test/${imageId}`), env, ctx);
+        assert.equal(image.headers.get('Content-Type'), `image/${extension}`);
+        assert.deepEqual(Buffer.from(await image.arrayBuffer()), Buffer.from(bytes, 'base64'));
+    }
+    await Promise.all(pending);
+});
+
+test('cleanup recognizes PNG and WebP paths and preserves locked images', async t => {
+    const { env, sqlite } = fixture();
+    await recordAccess(env, id, 1);
+    await recordAccess(env, second, 1);
+    await setLocked(env, second, true);
+    const deleted: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        if (String(url).includes('/git/trees/')) return Response.json({ tree: [
+            { path: `${id}.png`, type: 'blob' },
+            { path: `${second}.webp`, type: 'blob' },
+            { path: `nested/${id}.png`, type: 'blob' },
+        ] });
+        if (init?.method === 'DELETE') { deleted.push(String(url)); return Response.json({}); }
+        return Response.json({ sha: 'sha' });
+    });
+    await cleanupInactiveImages(env, RETENTION_MS * 2);
+    assert.equal(deleted.length, 1);
+    assert.ok(deleted[0].endsWith(`${id}.png`));
+    assert.equal(await getAccessTime(env, id), null);
+    assert.ok(sqlite.prepare('SELECT locked FROM image_access WHERE image_id = ?').get(second)?.locked);
+});

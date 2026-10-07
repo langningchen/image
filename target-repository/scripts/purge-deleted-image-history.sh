@@ -18,16 +18,16 @@ cutoff_epoch=$((now_epoch - retention_days * 86400))
 current_commit_epoch=0
 declare -A latest_deletion_by_path=()
 
-# The image service writes only 32-lowercase-letter JPEG names at repository
+# The image service writes only 32-lowercase-letter image names at repository
 # root. Restricting the match protects unrelated files from a history rewrite.
 while IFS= read -r line; do
     if [[ "$line" == @@DELETE_COMMIT:* ]]; then
         current_commit_epoch="${line#@@DELETE_COMMIT:}"
-    elif [[ "$line" =~ ^[a-z]{32}\.jpeg$ ]] && [[ -z "${latest_deletion_by_path[$line]+present}" ]]; then
+    elif [[ "$line" =~ ^[a-z]{32}\.(jpeg|png|webp)$ ]] && [[ -z "${latest_deletion_by_path[$line]+present}" ]]; then
         # git log is newest-first, so the first deletion seen is the latest one.
         latest_deletion_by_path["$line"]="$current_commit_epoch"
     fi
-done < <(git log HEAD --no-renames --diff-filter=D --format='@@DELETE_COMMIT:%ct' --name-only -- '*.jpeg')
+done < <(git log HEAD --no-renames --diff-filter=D --format='@@DELETE_COMMIT:%ct' --name-only -- '*.jpeg' '*.png' '*.webp')
 
 purge_paths=()
 for path in "${!latest_deletion_by_path[@]}"; do

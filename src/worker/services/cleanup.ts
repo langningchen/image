@@ -1,25 +1,25 @@
 import type { Env } from '../types.ts';
 import { claimDeletion, releaseDeletion, recoverDeletionClaims } from '../repositories/management.ts';
 import { RETENTION_MS } from '../constants.ts';
-import { listCurrentImageIds, deleteImageFromGithub } from '../repositories/github.ts';
+import { listCurrentImages, deleteImageFromGithub } from '../repositories/github.ts';
 import { listAccessTimes, getAccessTime, initializeAccess, removeAccess, removeAccessBatch } from '../repositories/access.ts';
 const BATCH_SIZE = 100;
 
 export async function cleanupInactiveImages(env: Env, now: number): Promise<void> {
     await recoverDeletionClaims(env, now);
-    const currentImageIds = await listCurrentImageIds(env);
+    const currentImages = await listCurrentImages(env);
     const accessTimes = await listAccessTimes(env);
     const cutoff = now - RETENTION_MS;
 
     // Give images uploaded before this feature a full seven days from the first
     // cleanup run instead of deleting them without a known last-access time.
-    const missingIds = [...currentImageIds].filter((imageId) => !accessTimes.has(imageId));
+    const missingIds = [...currentImages.keys()].filter((imageId) => !accessTimes.has(imageId));
     for (let index = 0; index < missingIds.length; index += BATCH_SIZE) {
         await initializeAccess(env, missingIds.slice(index, index + BATCH_SIZE), now);
     }
 
     const staleIds = [...accessTimes]
-        .filter(([imageId, lastAccessedAt]) => currentImageIds.has(imageId) && lastAccessedAt <= cutoff)
+        .filter(([imageId, lastAccessedAt]) => currentImages.has(imageId) && lastAccessedAt <= cutoff)
         .map(([imageId]) => imageId);
 
     let deletedCount = 0;
@@ -35,7 +35,7 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
             }
 
             if (!(await claimDeletion(env, imageId, cutoff))) continue;
-            await deleteImageFromGithub(env, imageId);
+            await deleteImageFromGithub(env, imageId, currentImages.get(imageId));
             await removeAccess(env, imageId);
             deletedCount += 1;
         } catch (error) {
@@ -44,7 +44,7 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
         }
     }
 
-    const orphanedIds = [...accessTimes.keys()].filter((imageId) => !currentImageIds.has(imageId));
+    const orphanedIds = [...accessTimes.keys()].filter((imageId) => !currentImages.has(imageId));
     for (let index = 0; index < orphanedIds.length; index += BATCH_SIZE) {
         await removeAccessBatch(env, orphanedIds.slice(index, index + BATCH_SIZE), now);
     }

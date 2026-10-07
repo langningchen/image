@@ -8,6 +8,7 @@ import {
   styled
 } from '@mui/material';
 import { CloudUpload } from '@mui/icons-material';
+import { prepareImage } from '../prepareImage.ts';
 
 const UploadBox = styled(Paper)(({ theme }) => ({
   border: `2px dashed ${theme.palette.divider}`,
@@ -41,43 +42,12 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const compressImage = useCallback(async (dataUrl: string, quality = 0.8): Promise<string> => {
-    return new Promise((resolve) => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d')!;
-      const img = new Image();
-
-      img.onload = () => {
-        // Calculate new dimensions (max 1920px width)
-        let { width, height } = img;
-        const maxWidth = 1920;
-        if (width > maxWidth) {
-          height = (height * maxWidth) / width;
-          width = maxWidth;
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        ctx.drawImage(img, 0, 0, width, height);
-
-        // Compress and return
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-
-      img.src = dataUrl;
-    });
-  }, []);
-
   const uploadFile = useCallback(async (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = async () => {
         try {
-          // Compress image if it's too large
-          let imageData = reader.result as string;
-          if (file.size > 1024 * 1024) { // If larger than 1MB
-            imageData = await compressImage(imageData, 0.8);
-          }
+          const imageData = await prepareImage(reader.result as string, file.size);
 
           const response = await fetch('/upload', {
             body: imageData,
@@ -101,7 +71,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       reader.onerror = () => reject(new Error('File read failed'));
       reader.readAsDataURL(file);
     });
-  }, [compressImage]);
+  }, []);
 
   const handleUpload = useCallback(async (files: FileList) => {
     if (files.length === 0) return;

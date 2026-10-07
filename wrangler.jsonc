@@ -1,4 +1,4 @@
-// Shared local configuration. Real resource IDs are injected by scripts/wrangler.mjs.
+// Resource IDs are omitted so Wrangler can provision bindings automatically.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "image",
@@ -24,7 +24,6 @@
     {
       "binding": "DB",
       "database_name": "image-access",
-      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],

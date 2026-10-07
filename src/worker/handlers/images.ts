@@ -6,9 +6,9 @@ import { clientIp, getIpControl, recordViolation, WARNING_THRESHOLD } from '../r
 import { saveModeration } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
 
-function imageResponseHeaders(imageId: string): HeadersInit {
+function imageResponseHeaders(imageId: string, extension: string): HeadersInit {
     return {
-        'Content-Type': 'image/jpeg',
+        'Content-Type': `image/${extension}`,
         // Deliberately keep the original long-lived cache. Only requests that
         // actually reach this Worker renew the seven-day inactivity timer.
         'Cache-Control': 'public, max-age=31536000, immutable',
@@ -70,6 +70,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
         imageId += String.fromCharCode(byte % 26 + 97);
     }
 
+    const extension = match[1].slice('image/'.length);
     const imageData = match[2];
     if (!imageData) {
         return new Response('Invalid image data', {
@@ -79,7 +80,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     }
 
     try {
-        const response = await fetch(githubApiUrl(env, `/contents/${imageId}.jpeg`), {
+        const response = await fetch(githubApiUrl(env, `/contents/${imageId}.${extension}`), {
             method: 'PUT',
             headers: {
                 ...githubHeaders(env),
@@ -100,7 +101,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
         }
 
         const jsonResponse = await response.json() as GithubContentResponse;
-        if (jsonResponse.content?.name !== `${imageId}.jpeg`) {
+        if (jsonResponse.content?.name !== `${imageId}.${extension}`) {
             console.error('Unexpected upload response:', jsonResponse);
             return new Response('Upload failed', {
                 status: 500,
@@ -139,17 +140,24 @@ export async function handleImageRequest(request: Request, env: Env, ctx: Execut
         return new Response('Image not found', { status: 404, headers: corsHeaders });
     }
 
-    const headers = imageResponseHeaders(imageId);
-
     try {
-        const githubResponse = await fetch(githubApiUrl(env, `/contents/${imageId}.jpeg`), {
-            method: 'GET',
-            headers: githubHeaders(env, 'application/vnd.github.raw+json'),
-        });
+        let extension = 'jpeg';
+        let githubResponse: Response | undefined;
+        for (const candidate of ['jpeg', 'png', 'webp']) {
+            extension = candidate;
+            githubResponse = await fetch(githubApiUrl(env, `/contents/${imageId}.${extension}`), {
+                method: 'GET',
+                headers: githubHeaders(env, 'application/vnd.github.raw+json'),
+            });
+            if (githubResponse.status !== 404) break;
+            await githubResponse.body?.cancel();
+        }
 
-        if (!githubResponse.ok) {
+        if (!githubResponse?.ok) {
             return new Response('Image not found', { status: 404, headers: corsHeaders });
         }
+
+        const headers = imageResponseHeaders(imageId, extension);
 
         // `?search` is used only by the uploader's local gallery preview and must
         // not extend the lifetime of an image.
