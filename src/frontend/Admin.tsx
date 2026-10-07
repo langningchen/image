@@ -3,6 +3,7 @@ import AdminAnalytics, { type Stats } from './components/AdminAnalytics';
 import { useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, CardMedia, Checkbox, FormControlLabel, Link, Chip, Container, CssBaseline, Stack, TextField, Typography, Tabs, Tab, MenuItem } from '@mui/material';
 import { LLAMA_LICENSE_URL, LLAMA_POLICY_URL } from '../terms.ts';
+import { prepareImage } from './prepareImage.ts';
 
 interface ImageRow {
   image_id: string;
@@ -59,6 +60,36 @@ export default function Admin() {
   const [counts, setCounts] = useState<{ status: string; count: number }[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [auditCursor, setAuditCursor] = useState<number | null>(null);
+  const [modelTest, setModelTest] = useState<{
+    file: string;
+    ok: boolean;
+    verdict?: { approved: boolean; reason: string };
+    responseType?: string;
+    durationMs?: number;
+    error?: string;
+    modelResponse?: string;
+  } | null>(null);
+
+  async function testModel(file: File) {
+    setBusy(true); setError(''); setModelTest(null);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('File read failed'));
+        reader.readAsDataURL(file);
+      });
+      const image = await prepareImage(dataUrl, file.size);
+      const response = await fetch('/api/admin/model-test', {
+        method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'text/plain' }, body: image, cache: 'no-store',
+      });
+      const result = await response.json();
+      if (response.status === 401) { setCredential(''); throw new Error('Incorrect or expired password'); }
+      if (!response.ok && response.status !== 422) throw new Error(result.error ?? 'Model test failed');
+      setModelTest({ ...result, file: file.name });
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
 
   async function changeFallback(value: 'allow' | 'deny') {
     setBusy(true); setError('');
@@ -173,7 +204,7 @@ export default function Admin() {
       <Typography variant="h5" sx={{ fontWeight: 600 }}>Image Administration</Typography>
       {credential && <Stack direction="row" spacing={.5}>
         <Button size="small" disabled={busy} onClick={() => load(credential)}>Refresh</Button>
-        <Button size="small" disabled={busy} onClick={() => { setCredential(''); setImages([]); setCursor(null); setStats(null); setIps([]); setAudit([]); setAuditCursor(null); setCounts([]); setLicenseAccepted(false); setOperatorEligible(false); setModelActivated(false); setError(''); }}>Sign out</Button>
+        <Button size="small" disabled={busy} onClick={() => { setCredential(''); setImages([]); setCursor(null); setStats(null); setIps([]); setAudit([]); setAuditCursor(null); setCounts([]); setLicenseAccepted(false); setOperatorEligible(false); setModelActivated(false); setModelTest(null); setError(''); }}>Sign out</Button>
       </Stack>}
     </Stack>}
     {credential && error && <Alert severity="error" sx={{ mb: 1.5 }}>{error}</Alert>}
@@ -200,6 +231,25 @@ export default function Admin() {
         <FormControlLabel control={<Checkbox checked={operatorEligible} onChange={event => setOperatorEligible(event.target.checked)} />} label="I confirm the operator is not an individual domiciled in, or a company with its principal place of business in, the European Union." />
         <Box><Button variant="contained" disabled={busy || !licenseAccepted || !operatorEligible} onClick={activateModel}>Agree and activate model</Button></Box>
         {modelActivated && <Alert severity="success" sx={{ mt: 2 }}>Cloudflare accepted the activation request. Image assessment is ready.</Alert>}
+        <Box sx={{ mt: 3 }}>
+          <Typography variant="h6">Test image assessment</Typography>
+          <Typography variant="body2" sx={{ mb: 1 }}>Send an image directly for assessment to see the actual verdict, response format and timing. This test does not host the image, apply fallback or record violations.</Typography>
+          <Button variant="outlined" component="label" disabled={busy}>Select test image
+            <input hidden disabled={busy} type="file" accept="image/jpeg,image/png,image/webp" onChange={event => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) void testModel(file);
+            }} />
+          </Button>
+          {modelTest && <Box sx={{ mt: 1.5 }}>
+            <Typography variant="body2">{modelTest.file}</Typography>
+            <Alert severity={!modelTest.ok ? 'error' : modelTest.verdict?.approved ? 'success' : 'warning'}>
+              {modelTest.ok ? `Model verdict: ${modelTest.verdict?.approved ? 'Allow' : 'Reject'} · ${modelTest.verdict?.reason}` : `Assessment failed: ${modelTest.error}`}
+            </Alert>
+            {modelTest.ok && <Typography variant="caption">Response format: {modelTest.responseType} · {modelTest.durationMs} ms</Typography>}
+            <FailureDetails error={null} response={modelTest.modelResponse ?? null} />
+          </Box>}
+        </Box>
       </CardContent></Card>}
       {tab === 'overview' && <>
         <Stack direction="row" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap' }}>{counts.map(row => <Chip key={row.status} label={`${row.status === 'error' ? 'Needs review' : row.status}: ${row.count}`} color={row.status === 'error' ? 'warning' : 'default'} onClick={() => { setTab('images'); setImageFilter(row.status); void load(credential, null, row.status); }} disabled={busy} />)}</Stack>

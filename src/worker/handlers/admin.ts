@@ -5,6 +5,8 @@ import { IMAGE_ID_PATTERN } from '../constants.ts';
 import { listImages, setLocked, getRetentionDistribution } from '../repositories/management.ts';
 import { getFallback, setFallback, listAudit, moderationCounts, approveImage, claimRemoval, finishRemoval } from '../repositories/assessment.ts';
 import { deleteImageFromGithub } from '../repositories/github.ts';
+import { assessImage } from '../services/moderation.ts';
+import { assessmentFailure } from '../repositories/assessment.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -30,6 +32,32 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return json({ error: 'Forbidden' }, 403);
     try {
+        if (request.method === 'POST' && url.pathname === '/api/admin/model-test') {
+            const reader = request.body?.getReader();
+            if (!reader) return json({ error: 'Image data required' }, 400);
+            const decoder = new TextDecoder();
+            let image = '';
+            let bytes = 0;
+            while (true) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                bytes += chunk.value.byteLength;
+                if (bytes > 10 * 1024 * 1024) {
+                    await reader.cancel();
+                    return json({ error: 'Image too large' }, 413);
+                }
+                image += decoder.decode(chunk.value, { stream: true });
+            }
+            image += decoder.decode();
+            const match = image.match(/^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
+            if (!match || match[1].length % 4 !== 0) return json({ error: 'Invalid image data' }, 400);
+            try {
+                return json({ ok: true, ...(await assessImage(env, image)) });
+            } catch (error) {
+                const details = assessmentFailure(error, env);
+                return json({ ok: false, ...details }, 422);
+            }
+        }
         if (url.pathname === '/api/admin/moderation-settings') {
             if (request.method === 'GET') return json({ fallback: await getFallback(env), counts: await moderationCounts(env) });
             if (request.method === 'PATCH') {

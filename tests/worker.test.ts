@@ -673,3 +673,98 @@ test('cleanup does not erase a recent fallback reservation from a stale GitHub t
     await cleanupInactiveImages(env, now + 60 * 60 * 1000 + 1);
     assert.equal(await getAccessTime(env, id), null);
 });
+
+test('object responses observed from real Workers AI are validated as strictly as text verdicts', () => {
+    assert.deepEqual(parseVerdict({ approved: true, reason: 'safe' }), { approved: true, reason: 'safe' });
+    assert.deepEqual(parseVerdict({ approved: false, reason: 'hate_extremism' }), { approved: false, reason: 'hate_extremism' });
+    for (const response of [{ approved: 'true', reason: 'safe' }, { approved: true, reason: 'hate_extremism' }, { approved: false, reason: 'safe' }, { approved: false, reason: 'unassessable' }, { approved: true, reason: 'safe', extra: 1 }, {}, []]) {
+        assert.throws(() => parseVerdict(response), AssessmentError);
+    }
+    const cases = [
+        { response: undefined, code: 'missing_response' },
+        { response: null, code: 'missing_response' },
+        { response: true, code: 'invalid_response_type' },
+        { response: [], code: 'invalid_response_type' },
+        { response: ' '.repeat(16385), code: 'oversized_response' },
+        { response: ' ', code: 'empty_response' },
+    ];
+    for (const item of cases) assert.throws(() => parseVerdict(item.response), (error: AssessmentError) => error.code === item.code);
+});
+
+test('real-shaped object verdicts allow safe uploads and reject prohibited uploads without fallback', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    let writes = 0;
+    t.mock.method(globalThis, 'fetch', async url => {
+        writes++;
+        return Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } });
+    });
+    t.mock.method(env.AI, 'run', async () => ({ response: { approved: true, reason: 'safe' }, tool_calls: [], usage: { completion_tokens: 10 } }));
+    const allowed = await worker.fetch(uploadRequest(), env, ctx);
+    assert.equal(allowed.status, 200);
+    const imageId = await allowed.text();
+    assert.equal(sqlite.prepare('SELECT moderation_status FROM image_access WHERE image_id = ?').get(imageId).moderation_status, 'approved');
+    t.mock.method(env.AI, 'run', async () => ({ response: { approved: false, reason: 'hate_extremism' }, tool_calls: [], usage: { completion_tokens: 17 } }));
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 400);
+    assert.equal(writes, 1);
+    assert.equal((await getIpControl(env, '203.0.113.1')).violations, 1);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM assessment_audit').get().count, 0);
+    await Promise.all(pending);
+});
+
+test('inconsistent object verdicts retain serialized failure evidence in fallback audit', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    t.mock.method(console, 'error', () => {});
+    t.mock.method(env.AI, 'run', async () => ({ response: { approved: true, reason: 'hate_extremism' } }));
+    t.mock.method(globalThis, 'fetch', async url => Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } }));
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 200);
+    const event = sqlite.prepare('SELECT * FROM assessment_audit').get();
+    assert.equal(event.model_response, '{"approved":true,"reason":"hate_extremism"}');
+    assert.match(event.error, /inconclusive/);
+    assert.equal(event.action, 'fallback_allow');
+    assert.equal(await getIpControl(env, '203.0.113.1'), null);
+    await Promise.all(pending);
+});
+
+test('missing binding responses record structural diagnostics rather than claiming oversized output', async t => {
+    const { env } = fixture();
+    t.mock.method(env.AI, 'run', async () => ({ usage: { completion_tokens: 0 } }));
+    await assert.rejects(moderateImage(env, 'data:image/png;base64,aGVsbG8='), (error: AssessmentError) => error.code === 'missing_response' && error.message.includes('[usage]'));
+    t.mock.method(env.AI, 'run', async () => null);
+    await assert.rejects(moderateImage(env, 'data:image/png;base64,aGVsbG8='), (error: AssessmentError) => error.code === 'missing_response');
+});
+
+test('authenticated model tests expose actual allow/reject verdicts without storage, strikes or fallback', async t => {
+    const { env, ctx, sqlite } = fixture();
+    let calls = 0;
+    const request = () => adminRequest('/model-test', { method: 'POST', body: 'data:image/png;base64,aGVsbG8=' });
+    t.mock.method(globalThis, 'fetch', () => { throw new Error('Model tests must not call storage'); });
+    t.mock.method(env.AI, 'run', async () => { calls++; return { response: { approved: true, reason: 'safe' } }; });
+    assert.equal((await worker.fetch(adminRequest('/model-test', { method: 'POST', body: 'data:image/png;base64,aGVsbG8=' }, 'wrong'), env, ctx)).status, 401);
+    assert.equal((await worker.fetch(adminRequest('/model-test', { method: 'POST', body: 'data:image/png;base64,aGVsbG8=', headers: { Origin: 'https://other.test' } }), env, ctx)).status, 403);
+    assert.equal((await worker.fetch(adminRequest('/model-test', { method: 'POST', body: 'not an image' }), env, ctx)).status, 400);
+    assert.equal((await worker.fetch(adminRequest('/model-test', { method: 'POST', body: 'x'.repeat(10 * 1024 * 1024 + 1) }), env, ctx)).status, 413);
+    assert.equal(calls, 0);
+    const allowed = await worker.fetch(request(), env, ctx);
+    assert.equal(allowed.headers.get('Cache-Control'), 'no-store');
+    const result = await allowed.json();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.verdict, { approved: true, reason: 'safe' });
+    assert.equal(result.responseType, 'object');
+    assert.equal(result.modelResponse, '{"approved":true,"reason":"safe"}');
+    assert.ok(result.durationMs >= 0);
+    t.mock.method(env.AI, 'run', async () => ({ response: '{"approved":false,"reason":"hate_extremism"}' }));
+    const rejected = await (await worker.fetch(request(), env, ctx)).json();
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.verdict.approved, false);
+    assert.equal(rejected.responseType, 'text');
+    t.mock.method(env.AI, 'run', async () => ({ response: 'The image shows a landscape.' }));
+    const failed = await worker.fetch(request(), env, ctx);
+    assert.equal(failed.status, 422);
+    const failure = await failed.json();
+    assert.equal(failure.ok, false);
+    assert.equal(failure.code, 'invalid_json');
+    assert.equal(failure.modelResponse, 'The image shows a landscape.');
+    for (const table of ['image_access', 'assessment_audit', 'moderation_events', 'ip_controls']) {
+        assert.equal(sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0);
+    }
+});
