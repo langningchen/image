@@ -13,15 +13,16 @@ import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
 import { setFallback, getFallback } from '../src/worker/repositories/assessment.ts';
 import { parseVerdict, AssessmentError, moderateImage } from '../src/worker/services/moderation.ts';
 
-const id = 'a'.repeat(32);
-const second = 'b'.repeat(32);
-function fixture() {
+const id = 'a1'.repeat(16);
+const second = 'b2'.repeat(16);
+function fixture(alphanumericIds = true) {
     const sqlite = new DatabaseSync(':memory:');
     sqlite.exec(readFileSync(new URL('../migrations/0001_image_access.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0002_image_management.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0003_upload_controls_and_traffic.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0004_ip_geolocation.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0005_moderation_fallback.sql', import.meta.url), 'utf8'));
+    if (alphanumericIds) sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
@@ -72,7 +73,7 @@ test('upload initializes D1, previews do not renew and conditional views do rene
         return new Response('image bytes');
     });
     const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: 'data:image/jpeg;base64,aGVsbG8=' }), env, ctx);
-    assert.match(await response.text(), /^[a-z]{32}$/);
+    assert.match(await response.text(), /^[0-9a-z]{32}$/);
     assert.equal(uploaded.length, 32);
     assert.ok(await getAccessTime(env, uploaded));
     await recordAccess(env, id, 1);
@@ -512,7 +513,7 @@ test('default allow fallback uploads non-JSON responses and provider failures in
         const response = await worker.fetch(uploadRequest(), env, ctx);
         assert.equal(response.status, 200);
         const imageId = await response.text();
-        assert.match(imageId, /^[a-z]{32}$/);
+        assert.match(imageId, /^[0-9a-z]{32}$/);
         const image = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(imageId);
         assert.equal(image.moderation_status, 'error');
         assert.equal(image.uploader_ip, '203.0.113.1');
@@ -766,5 +767,55 @@ test('authenticated model tests expose actual allow/reject verdicts without stor
     assert.equal(failure.modelResponse, 'The image shows a landscape.');
     for (const table of ['image_access', 'assessment_audit', 'moderation_events', 'ip_controls']) {
         assert.equal(sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0);
+    }
+});
+
+test('alphanumeric migration preserves existing image state and indexes while accepting digits', async () => {
+    const { env, sqlite } = fixture(false);
+    const legacy = 'a'.repeat(32);
+    const claimed = 'b'.repeat(32);
+    await recordAccess(env, legacy, 123);
+    await recordAccess(env, claimed, 456);
+    sqlite.prepare(`UPDATE image_access SET locked = 1, moderation_status = 'error', moderation_reason = 'invalid_json',
+        moderated_at = 100, uploader_ip = '203.0.113.1', uploaded_at = 90, moderation_error = 'invalid_json: failure', moderation_response = 'The image...'
+        WHERE image_id = ?`).run(legacy);
+    sqlite.prepare('UPDATE image_access SET deleting = 1, deletion_started_at = 200 WHERE image_id = ?').run(claimed);
+    sqlite.prepare("INSERT INTO assessment_audit (image_id, action, outcome, created_at) VALUES (?, 'fallback_allow', 'uploaded', 90)").run(legacy);
+    const before = sqlite.prepare('SELECT * FROM image_access ORDER BY image_id').all();
+    await assert.rejects(recordAccess(env, id, 789), /CHECK constraint/);
+    sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(sqlite.prepare('SELECT * FROM image_access ORDER BY image_id').all(), before);
+    assert.equal(sqlite.prepare('SELECT image_id FROM assessment_audit').get().image_id, legacy);
+    const indexes = sqlite.prepare("PRAGMA index_list('image_access')").all().map(row => row.name);
+    assert.ok(indexes.includes('idx_image_access_last_accessed_at'));
+    assert.ok(indexes.includes('idx_image_moderation_status'));
+    for (const valid of [id, '0'.repeat(32), '12345678901234567890123456789012']) {
+        await recordAccess(env, valid, 789);
+        assert.equal(await getAccessTime(env, valid), 789);
+    }
+    for (const invalid of ['A'.repeat(32), 'a'.repeat(31), 'a'.repeat(33), '_'.repeat(32), 'a'.repeat(31) + '-']) {
+        await assert.rejects(recordAccess(env, invalid, 789), /CHECK constraint/);
+    }
+});
+
+test('all-digit image requests and admin pagination support access, traffic, locks and review', async t => {
+    const { env, ctx, pending } = fixture();
+    const digits = '12345678901234567890123456789012';
+    await recordAccess(env, digits, 100);
+    await recordAccess(env, id, 100);
+    t.mock.method(globalThis, 'fetch', async () => new Response('1234567890'));
+    const response = await worker.fetch(new Request(`https://image.test/${digits}`, { headers: { 'CF-Connecting-IP': '203.0.113.1' } }), env, ctx);
+    assert.equal(response.status, 200);
+    await response.text();
+    await Promise.all(pending);
+    assert.ok((await getAccessTime(env, digits)) > 100);
+    assert.equal((await getTrafficStats(env, 7)).totals.bytes, 10);
+    const page = await (await worker.fetch(adminRequest(`/images?cursor=${digits}`), env, ctx)).json();
+    assert.equal(page.images[0].image_id, id);
+    assert.equal((await worker.fetch(adminRequest(`/images/${digits}/lock`, { method: 'PATCH', body: '{"locked":true}' }), env, ctx)).status, 200);
+    assert.equal((await worker.fetch(adminRequest(`/images/${digits}/review`, { method: 'POST', body: '{"action":"approve"}' }), env, ctx)).status, 200);
+    for (const invalid of ['A'.repeat(32), '_'.repeat(32), digits + '1']) {
+        assert.equal((await worker.fetch(adminRequest(`/images/${invalid}/lock`, { method: 'PATCH', body: '{"locked":true}' }), env, ctx)).status, 404);
+        assert.equal((await worker.fetch(adminRequest(`/images/${invalid}/review`, { method: 'POST', body: '{"action":"approve"}' }), env, ctx)).status, 404);
     }
 });

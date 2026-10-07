@@ -76,8 +76,8 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             if (!Number.isSafeInteger(before) || before <= 0) return json({ error: 'Invalid cursor' }, 400);
             return json(await listAudit(env, before));
         }
-        const review = url.pathname.match(/^\/api\/admin\/images\/([a-z]{32})\/review$/);
-        if (request.method === 'POST' && review) {
+        const review = url.pathname.match(/^\/api\/admin\/images\/([^/]+)\/review$/);
+        if (request.method === 'POST' && review && IMAGE_ID_PATTERN.test(review[1])) {
             let body: unknown;
             try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
             if (!body || typeof body !== 'object' || !('action' in body) || !['approve', 'remove'].includes(String(body.action))) {
@@ -142,8 +142,8 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             await updateIpControl(env, ip, body.action as 'exempt' | 'unexempt' | 'ban' | 'unban');
             return json({ success: true });
         }
-        const match = url.pathname.match(/^\/api\/admin\/images\/([a-z]{32})\/lock$/);
-        if (request.method === 'PATCH' && match) {
+        const match = url.pathname.match(/^\/api\/admin\/images\/([^/]+)\/lock$/);
+        if (request.method === 'PATCH' && match && IMAGE_ID_PATTERN.test(match[1])) {
             let body: unknown;
             try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
             if (!body || typeof body !== 'object' || !('locked' in body) || typeof body.locked !== 'boolean') {

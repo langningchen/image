@@ -12,7 +12,7 @@ A simple image hosting service built with React, Vite, Cloudflare Workers and D1
 - `src/worker/services/cleanup.ts`: daily reconciliation and inactivity cleanup.
 - `migrations/`: versioned D1 schema; `scripts/`: deployment configuration and KV import.
 
-Workers Static Assets serves matching static files directly. `/upload` always enters the Worker, and unmatched image URLs enter the Worker. The public uploader and `/admin/` each have a static HTML entry, so SPA fallback is disabled: missing images and unknown paths must return 404 rather than HTML. Existing `POST /upload`, `GET /<32 lowercase letters>` and `?search` preview URLs are preserved.
+Workers Static Assets serves matching static files directly. `/upload` always enters the Worker, and unmatched image URLs enter the Worker. The public uploader and `/admin/` each have a static HTML entry, so SPA fallback is disabled: missing images and unknown paths must return 404 rather than HTML. Existing `POST /upload`, `GET /<32 lowercase letters or digits>` and `?search` preview URLs are preserved.
 
 Access timestamps use monotonic SQL upserts: delayed requests cannot move the timestamp backward. Preview requests do not renew retention. Successful conditional (304) image requests renew retention. Cleanup initializes untracked GitHub images with seven days of grace, rechecks access before deletion, serializes GitHub commits and removes orphaned metadata. GitHub and D1 do not share a transaction; an access during the GitHub deletion call can still race with cleanup. Image locks are enforced through atomic D1 deletion claims.
 
@@ -111,6 +111,12 @@ pnpm start
 ```
 
 `start` builds the frontend and runs the Worker with local D1 at `http://localhost:8787`. For frontend hot reload, run `pnpm dev` in a second terminal; Vite proxies upload and image requests to the local Worker. Exercise cron at `http://localhost:8787/cdn-cgi/handler/scheduled`.
+
+## Alphanumeric image IDs
+
+Image IDs accept exactly 32 characters from `a-z` and `0-9`, including legacy IDs containing digits. Upload response validation, image routes, traffic recording, admin review/lock routes and cursors, service-worker caching, the Vite proxy, KV import and history cleanup use this format. The current generator still produces letters only; those IDs remain valid.
+
+Apply `migrations/0006_alphanumeric_image_ids.sql` before using numeric IDs in D1. It rebuilds the old letter-only CHECK constraint while preserving all image records, access times, locks, deletion claims and moderation evidence, and recreates the indexes. `pnpm deploy` applies it automatically. Historical migration `0001` intentionally retains its original schema. If the purge-history script is installed in a separate image repository, copy the updated script there as well.
 
 ## Migrating existing KV access times
 

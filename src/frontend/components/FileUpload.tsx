@@ -10,6 +10,7 @@ import {
 import { CloudUpload } from '@mui/icons-material';
 import { prepareImage } from '../prepareImage.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
+import { IMAGE_ID_PATTERN } from '../../worker/constants.ts';
 
 const UploadBox = styled(Paper)(({ theme }) => ({
   border: `2px dashed ${theme.palette.divider}`,
@@ -61,7 +62,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
 
           const imageId = await response.text();
 
-          if (!response.ok || !/^[a-z]{32}$/.test(imageId)) {
+          if (!response.ok || !IMAGE_ID_PATTERN.test(imageId)) {
             reject(new Error(!response.ok ? imageId || 'Upload failed' : 'Upload failed'));
           } else {
             resolve(imageId);

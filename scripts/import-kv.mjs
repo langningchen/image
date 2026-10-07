@@ -11,7 +11,7 @@ if (!Array.isArray(records)) throw new Error('Expected a JSON array of KV keys.'
 const timestamps = new Map();
 for (const record of records) {
     const key = record.name ?? record.key;
-    if (typeof key !== 'string' || !/^image:[a-z]{32}$/.test(key)) continue;
+    if (typeof key !== 'string' || !/^image:[0-9a-z]{32}$/.test(key)) continue;
     const value = record.metadata?.lastAccessedAt ?? record.value;
     const time = typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value)) ? Number(value) : NaN;
     if (!Number.isSafeInteger(time) || time < 0) throw new Error(`Missing or invalid timestamp for ${key}; export its KV value before importing.`);

@@ -1,7 +1,7 @@
 import type { Env } from './types.ts';
 import { trackResponse, pruneActivity } from './repositories/traffic.ts';
 import { handleAdmin } from './handlers/admin.ts';
-import { corsHeaders } from './constants.ts';
+import { corsHeaders, IMAGE_ID_PATTERN } from './constants.ts';
 import { handleUpload, handleImageRequest } from './handlers/images.ts';
 import { cleanupInactiveImages } from './services/cleanup.ts';
 
@@ -23,7 +23,7 @@ export default {
         }
         if (request.method === 'GET') {
             const response = await handleImageRequest(request, env, ctx);
-            if (/^\/[a-z]{32}$/.test(url.pathname)) return trackResponse(request, response, env, ctx);
+            if (IMAGE_ID_PATTERN.test(url.pathname.slice(1))) return trackResponse(request, response, env, ctx);
             return response;
         }
         return new Response('404', { status: 404 });

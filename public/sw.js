@@ -19,7 +19,7 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     
     // Cache images aggressively since they never change
-    if (event.request.method === 'GET' && url.pathname.match(/^\/[a-z]{32}$/)) {
+    if (event.request.method === 'GET' && url.pathname.match(/^\/[0-9a-z]{32}$/)) {
         event.respondWith(
             caches.open(CACHE_NAME).then(cache => {
                 return cache.match(event.request).then(cachedResponse => {
