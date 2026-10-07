@@ -1,6 +1,9 @@
 import type { Env } from '../types.ts';
 import { IMAGE_ID_PATTERN, corsHeaders } from '../constants.ts';
 import { githubApiUrl, githubHeaders, type GithubContentResponse } from '../repositories/github.ts';
+import { moderateImage } from '../services/moderation.ts';
+import { clientIp, getIpControl, recordViolation, WARNING_THRESHOLD } from '../repositories/ip-controls.ts';
+import { saveModeration } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
 
 function imageResponseHeaders(imageId: string): HeadersInit {
@@ -17,14 +20,57 @@ function imageResponseHeaders(imageId: string): HeadersInit {
     };
 }
 
-export async function handleUpload(request: Request, env: Env): Promise<Response> {
-    const image = await request.text();
+export async function handleUpload(request: Request, env: Env, metrics = { bytes: 0 }): Promise<Response> {
+    const failure = (message: string, status: number) => new Response(message, { status, headers: corsHeaders });
+    const ip = clientIp(request);
+    let control;
+    try { control = await getIpControl(env, ip); } catch { return failure('Upload temporarily unavailable', 503); }
+    if (control && control.banned_until > Date.now()) return failure('Uploads are temporarily suspended. Please try again later.', 403);
+    const reader = request.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    if (reader) {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            metrics.bytes += value.byteLength;
+            if (metrics.bytes > 10 * 1024 * 1024) {
+                await reader.cancel();
+                return failure('Image too large', 413);
+            }
+            chunks.push(value);
+        }
+    }
+    const buffer = new Uint8Array(metrics.bytes);
+    let offset = 0;
+    for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+    const image = new TextDecoder().decode(buffer);
+    const match = image.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match || match[2].length % 4 !== 0) return failure('Invalid image data', 400);
+    let verdict = { approved: true, reason: 'exempt' };
+    if (!control?.exempt) {
+        try { verdict = await moderateImage(env, image); } catch (error) {
+            console.error('Image assessment failed:', error);
+            return failure('Upload temporarily unavailable', 503);
+        }
+        if (!verdict.approved) {
+            try {
+                const violation = await recordViolation(env, ip, verdict.reason);
+                if (violation.banned_until > Date.now()) return failure('Uploads are temporarily suspended. Please try again later.', 403);
+                return failure(violation.violations >= WARNING_THRESHOLD ? 'Warning: Do not upload prohibited content. Further violations will suspend uploads.' : 'Upload not allowed', 400);
+            } catch { return failure('Upload temporarily unavailable', 503); }
+        }
+    }
+    // Recheck after inference in case another upload or the administrator banned this IP.
+    try {
+        const latest = await getIpControl(env, ip);
+        if (latest && latest.banned_until > Date.now()) return failure('Uploads are temporarily suspended. Please try again later.', 403);
+    } catch { return failure('Upload temporarily unavailable', 503); }
     let imageId = '';
     for (const byte of crypto.getRandomValues(new Uint8Array(32))) {
         imageId += String.fromCharCode(byte % 26 + 97);
     }
 
-    const imageData = image.replace(/^data:image\/[^;]+;base64,/, '');
+    const imageData = match[2];
     if (!imageData) {
         return new Response('Invalid image data', {
             status: 400,
@@ -64,6 +110,7 @@ export async function handleUpload(request: Request, env: Env): Promise<Response
 
         try {
             await recordAccess(env, imageId);
+            await saveModeration(env, imageId, 'approved', verdict.reason);
         } catch (error) {
             // The daily reconciliation initializes missing records, so do not make a
             // successful GitHub upload look like a failure if D1 is temporarily down.

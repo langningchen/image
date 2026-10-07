@@ -90,7 +90,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
           const imageId = await response.text();
 
           if (!response.ok || !/^[a-z]{32}$/.test(imageId)) {
-            reject(new Error('Upload failed'));
+            reject(new Error(!response.ok ? imageId || 'Upload failed' : 'Upload failed'));
           } else {
             resolve(imageId);
           }
@@ -129,7 +129,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       setTimeout(() => setSuccess(null), 3000);
     } catch (error) {
       console.error('Upload error:', error);
-      setError('Upload failed. Please try again.');
+      setError(error instanceof Error ? error.message : 'Upload failed. Please try again.');
       setTimeout(() => setError(null), 5000);
     } finally {
       setUploading(false);
@@ -211,7 +211,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
-        elevation={1}
+        elevation={0}
       >
         <CloudUpload sx={{ fontSize: 48, color: 'text.secondary', mb: 2 }} />
         <Typography variant="h6" gutterBottom>

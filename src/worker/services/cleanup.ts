@@ -1,10 +1,12 @@
 import type { Env } from '../types.ts';
+import { claimDeletion, releaseDeletion, recoverDeletionClaims } from '../repositories/management.ts';
 import { RETENTION_MS } from '../constants.ts';
 import { listCurrentImageIds, deleteImageFromGithub } from '../repositories/github.ts';
 import { listAccessTimes, getAccessTime, initializeAccess, removeAccess, removeAccessBatch } from '../repositories/access.ts';
 const BATCH_SIZE = 100;
 
 export async function cleanupInactiveImages(env: Env, now: number): Promise<void> {
+    await recoverDeletionClaims(env, now);
     const currentImageIds = await listCurrentImageIds(env);
     const accessTimes = await listAccessTimes(env);
     const cutoff = now - RETENTION_MS;
@@ -32,10 +34,12 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
                 continue;
             }
 
+            if (!(await claimDeletion(env, imageId, cutoff))) continue;
             await deleteImageFromGithub(env, imageId);
             await removeAccess(env, imageId);
             deletedCount += 1;
         } catch (error) {
+            await releaseDeletion(env, imageId);
             console.error('Scheduled image deletion failed:', imageId, error);
         }
     }

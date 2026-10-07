@@ -1,6 +1,6 @@
 # Image
 
-A simple image hosting service built with React, Vite, Cloudflare Workers and D1. Image bytes remain in a dedicated private GitHub repository; D1 stores image access times for the seven-day inactivity cleanup.
+A simple image hosting service built with React, Vite, Cloudflare Workers and D1. Image bytes remain in a dedicated private GitHub repository; D1 stores image access times, management settings, upload violations and traffic aggregates.
 
 ## Architecture
 
@@ -12,11 +12,45 @@ A simple image hosting service built with React, Vite, Cloudflare Workers and D1
 - `src/worker/services/cleanup.ts`: daily reconciliation and inactivity cleanup.
 - `migrations/`: versioned D1 schema; `scripts/`: deployment configuration and KV import.
 
-Workers Static Assets serves matching static files directly. `/upload` always enters the Worker, and unmatched image URLs enter the Worker. This app has one page, so SPA fallback is disabled: missing images and unknown paths must return 404 rather than HTML. Existing `POST /upload`, `GET /<32 lowercase letters>` and `?search` preview URLs are preserved.
+Workers Static Assets serves matching static files directly. `/upload` always enters the Worker, and unmatched image URLs enter the Worker. The public uploader and `/admin/` each have a static HTML entry, so SPA fallback is disabled: missing images and unknown paths must return 404 rather than HTML. Existing `POST /upload`, `GET /<32 lowercase letters>` and `?search` preview URLs are preserved.
 
-Access timestamps use monotonic SQL upserts: delayed requests cannot move the timestamp backward. Preview requests do not renew retention. Successful conditional (304) image requests renew retention. Cleanup initializes untracked GitHub images with seven days of grace, rechecks access before deletion, serializes GitHub commits and removes orphaned metadata. GitHub and D1 do not share a transaction; an access during the GitHub deletion call can still race with cleanup.
+Access timestamps use monotonic SQL upserts: delayed requests cannot move the timestamp backward. Preview requests do not renew retention. Successful conditional (304) image requests renew retention. Cleanup initializes untracked GitHub images with seven days of grace, rechecks access before deletion, serializes GitHub commits and removes orphaned metadata. GitHub and D1 do not share a transaction; an access during the GitHub deletion call can still race with cleanup. Image locks are enforced through atomic D1 deletion claims.
 
 Browser and service-worker image caches retain the existing long-lived caching behavior. Only requests reaching the Worker renew retention; cache hits do not. Removing an image on the server does not invalidate existing browser copies.
+
+## Administration and upload controls
+
+Open `/admin/` and sign in with `ADMIN_PASSWORD`. Set a strong random secret before deployment:
+
+```sh
+pnpm wrangler:remote secret put ADMIN_PASSWORD
+pnpm db:migrate:remote
+pnpm deploy
+```
+
+For local development, add `ADMIN_PASSWORD` to `.dev.vars`. Without it, all management APIs return 503. The admin password is kept only in page memory and sent as a Bearer credential over HTTPS; it is never written to browser storage. There is no public navigation link to the administration page.
+
+- Lock images to exclude them from inactivity deletion. Unlocking resumes the existing inactivity timer. Deletion claims and locks are mutually exclusive in D1; an image already being deleted cannot be locked. Interrupted deletion claims are recovered by the next daily job after one hour.
+- Add individual IPv4 or IPv6 addresses to the exemption list to skip content assessment. Addresses are normalized; CIDR ranges are not supported. Explicit IP bans take precedence over exemption.
+- Rejected uploads record the Cloudflare-provided client IP, category and timestamp. Three violations in a fixed 24-hour window produce a warning; five pause uploads for 24 hours. Counters update atomically. Administrators can impose a 24-hour ban or lift it and reset strikes.
+- View UTC daily charts for upload/download bytes, request counts and active IPs over 7, 30 or 90 days, plus the top 20 IPs ranked by bytes or upload attempts. IP summaries show upload attempts, successful/failed uploads, and today's UTC upload count. The IP management list includes observed IPs as well as manually configured IPs. Counts include failed requests and gallery previews. Upload bytes measure request data consumed by the Worker (including base64 encoding); download bytes measure response chunks delivered by the Worker. Native static assets and browser/service-worker cache hits are excluded. Statistics are asynchronous and can lag briefly. Activity records are retained for 90 days by the daily job.
+
+New uploads from non-exempt IPs are assessed before any GitHub write using the Workers AI vision model [`@cf/meta/llama-3.2-11b-vision-instruct`](https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/). AI errors and inconclusive results return a generic temporary failure without recording a violation. Explicit sexual content, sexualized minors, graphic violence, encouragement of self-harm, and hateful/terrorist propaganda are rejected. Assessment is probabilistic; existing stored images are not retroactively scanned. Uploaded data URLs are limited to 10 MiB and accept JPEG, PNG and WebP.
+
+This model requires a one-time account-level acceptance of Meta's license and acceptable-use policy. Review the linked model documentation and, if you agree, send the initial `{"prompt":"agree"}` request using your own account credentials:
+
+```sh
+curl "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/@cf/meta/llama-3.2-11b-vision-instruct" \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"prompt":"agree"}'
+```
+
+The public uploader and administration interface do not display AI assessment details. They show generic upload errors, violation warnings and temporary suspensions where applicable. An AI binding is declared in Wrangler; no AI API key is embedded in the application. Local Workers AI calls use Cloudflare's remote service and can incur usage.
+
+The overview also includes an interactive doughnut chart of all tracked images by cleanup eligibility: ready now, remaining 1–7 days, locked, and deleting. Individual image cards show their remaining retention time. These estimates describe when an image becomes eligible; the daily job performs the actual deletion. Renewed access and locking can change the distribution.
+
+IP location previews use [Cloudflare request metadata](https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties): country, region, city, ASN and network organization. The latest known location is saved with the existing daily traffic update, without a separate geolocation API call or an additional write per request. Location is approximate and is unavailable for historical records until a new request supplies metadata. IP management counts span retained activity (up to 90 days); ranking counts follow the selected 7/30/90-day range. Counters include failed upload attempts and do not impose a frequency limit.
 
 ## Setup and deployment
 
@@ -44,7 +78,7 @@ Browser and service-worker image caches retain the existing long-lived caching b
    ```
 
 6. Configure your existing Worker custom domain/route in Cloudflare (the template preserves `workers_dev: false`), or enable `workers_dev` in the shared configuration if you want a workers.dev URL.
-7. Validate and deploy:
+7. Set `ADMIN_PASSWORD` and complete the model activation described above, then validate and deploy:
 
    ```sh
    pnpm typecheck

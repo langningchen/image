@@ -22,7 +22,8 @@
   },
   "include": [
     "src/frontend",
-    "src/main.tsx"
+    "src/main.tsx",
+    "src/admin.tsx"
   ],
   "references": [
     {
