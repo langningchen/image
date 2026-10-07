@@ -11,6 +11,8 @@ import {
 } from '@mui/material';
 import FileUpload from './components/FileUpload';
 import ImageGallery from './components/ImageGallery';
+import UploadConsent from './components/UploadConsent';
+import { TERMS_VERSION } from '../terms.ts';
 
 const theme = createTheme({
   palette: {
@@ -23,6 +25,10 @@ const theme = createTheme({
 
 const App: React.FC = () => {
   const [images, setImages] = useState<string[]>([]);
+  const [consented, setConsented] = useState(() => {
+    try { return localStorage.getItem('acceptedTermsVersion') === TERMS_VERSION; }
+    catch { return false; }
+  });
 
   useEffect(() => {
     // Load existing images from localStorage
@@ -88,7 +94,17 @@ const App: React.FC = () => {
           </Typography>
         </Box>
 
-        <FileUpload onImageUploaded={handleImageUploaded} />
+        {consented ? <FileUpload onImageUploaded={handleImageUploaded} /> : <UploadConsent onAccept={() => {
+          try { localStorage.setItem('acceptedTermsVersion', TERMS_VERSION); } catch { /* Allow consent for this session. */ }
+          setConsented(true);
+        }} />}
+        <Typography variant="body2" sx={{ mb: 3 }}>
+          Built with Llama · <Link href="/terms.html" target="_blank" rel="noopener">Terms of Service</Link>
+          {consented && <> · <Link component="button" onClick={() => {
+            try { localStorage.removeItem('acceptedTermsVersion'); } catch { /* Session state still resets. */ }
+            setConsented(false);
+          }}>Review consent</Link></>}
+        </Typography>
         
         <ImageGallery images={images} onImageDeleted={handleImageDeleted} />
       </Container>

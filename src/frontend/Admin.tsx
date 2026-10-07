@@ -1,7 +1,8 @@
 import IpLocation, { type IpDetails } from './components/IpLocation';
 import AdminAnalytics, { type Stats } from './components/AdminAnalytics';
 import { useState } from 'react';
-import { Alert, Box, Button, Card, CardContent, CardMedia, Chip, Container, CssBaseline, Stack, TextField, Typography, Tabs, Tab } from '@mui/material';
+import { Alert, Box, Button, Card, CardContent, CardMedia, Checkbox, FormControlLabel, Link, Chip, Container, CssBaseline, Stack, TextField, Typography, Tabs, Tab } from '@mui/material';
+import { LLAMA_LICENSE_URL, LLAMA_POLICY_URL } from '../terms.ts';
 
 interface ImageRow {
   image_id: string;
@@ -24,6 +25,18 @@ export default function Admin() {
   const [newIp, setNewIp] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [licenseAccepted, setLicenseAccepted] = useState(false);
+  const [operatorEligible, setOperatorEligible] = useState(false);
+  const [modelActivated, setModelActivated] = useState(false);
+
+  async function activateModel() {
+    setBusy(true); setError(''); setModelActivated(false);
+    try {
+      await api('/model-license', credential, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agree: licenseAccepted, nonEuOperator: operatorEligible }) });
+      setModelActivated(true);
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
 
   async function api(path: string, token: string, init: RequestInit = {}) {
     const response = await fetch(`/api/admin${path}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` }, cache: 'no-store' });
@@ -111,8 +124,16 @@ export default function Admin() {
       </Box>
     </CardContent></Card></Box> : <>
       <Tabs value={tab} onChange={(_, value) => setTab(value)} aria-label="Administration sections" sx={{ mb: 1.5, minHeight: 40, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { minHeight: 40, py: 1, minWidth: 80 } }}>
-        <Tab value="overview" label="Overview" /><Tab value="images" label="Images" /><Tab value="ips" label="IP controls" />
+        <Tab value="overview" label="Overview" /><Tab value="images" label="Images" /><Tab value="ips" label="IP controls" /><Tab value="model" label="Model setup" />
       </Tabs>
+      {tab === 'model' && <Card variant="outlined"><CardContent>
+        <Typography variant="h6">Activate image assessment</Typography>
+        <Typography variant="body2" sx={{ mb: 1 }}>Before the first assessed upload, the Cloudflare account operator must accept the model license. This sends the required “agree” prompt using this Worker's AI binding. Upload users' consent does not replace the operator's acceptance.</Typography>
+        <FormControlLabel control={<Checkbox checked={licenseAccepted} onChange={event => setLicenseAccepted(event.target.checked)} />} label={<span>As the authorized account operator, I agree to the <Link href={LLAMA_LICENSE_URL} target="_blank" rel="noopener">Llama 3.2 Community License</Link> and <Link href={LLAMA_POLICY_URL} target="_blank" rel="noopener">Acceptable Use Policy</Link>.</span>} />
+        <FormControlLabel control={<Checkbox checked={operatorEligible} onChange={event => setOperatorEligible(event.target.checked)} />} label="I confirm the operator is not an individual domiciled in, or a company with its principal place of business in, the European Union." />
+        <Box><Button variant="contained" disabled={busy || !licenseAccepted || !operatorEligible} onClick={activateModel}>Agree and activate model</Button></Box>
+        {modelActivated && <Alert severity="success" sx={{ mt: 2 }}>Cloudflare accepted the activation request. Image assessment is ready.</Alert>}
+      </CardContent></Card>}
       {tab === 'overview' && <>
         <Stack direction="row" spacing={.75} sx={{ mb: 1.5 }}>{[7, 30, 90].map(value => <Button size="small" key={value} disabled={busy} variant={days === value ? 'contained' : 'outlined'} onClick={() => changeDays(value)}>Last {value} days</Button>)}</Stack>
         <AdminAnalytics stats={stats} busy={busy} order={order} onOrderChange={changeOrder} />

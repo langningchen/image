@@ -28,6 +28,17 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return json({ error: 'Forbidden' }, 403);
     try {
+        if (request.method === 'POST' && url.pathname === '/api/admin/model-license') {
+            let body: unknown;
+            try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
+            if (!body || typeof body !== 'object' || !('agree' in body) || body.agree !== true
+                || !('nonEuOperator' in body) || body.nonEuOperator !== true) {
+                return json({ error: 'Explicit license acceptance and operator eligibility are required' }, 400);
+            }
+            // Only the authenticated operator can accept the account-level license.
+            await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', { prompt: 'agree' });
+            return json({ success: true });
+        }
         if (request.method === 'GET' && url.pathname === '/api/admin/images') {
             const cursor = url.searchParams.get('cursor') ?? '';
             if (cursor && !IMAGE_ID_PATTERN.test(cursor)) return json({ error: 'Invalid cursor' }, 400);

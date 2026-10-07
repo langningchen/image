@@ -36,14 +36,9 @@ For local development, add `ADMIN_PASSWORD` to `.dev.vars`. Without it, all mana
 
 New uploads from non-exempt IPs are assessed before any GitHub write using the Workers AI vision model [`@cf/meta/llama-3.2-11b-vision-instruct`](https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/). AI errors and inconclusive results return a generic temporary failure without recording a violation. Explicit sexual content, sexualized minors, graphic violence, encouragement of self-harm, and hateful/terrorist propaganda are rejected. Assessment is probabilistic; existing stored images are not retroactively scanned. JPEG, PNG and WebP uploads retain their original storage format and response MIME type. PNG files bypass canvas compression to preserve transparent pixels; large WebP files retain WebP encoding. Uploaded data URLs are limited to 10 MiB and accept JPEG, PNG and WebP.
 
-This model requires a one-time account-level acceptance of Meta's license and acceptable-use policy. Review the linked model documentation and, if you agree, send the initial `{"prompt":"agree"}` request using your own account credentials:
+This model requires one-time account-level acceptance of Meta's license and acceptable-use policy. After deployment, the authorized Cloudflare account operator must open `/admin/` → **Model setup**, read the linked license/policy, explicitly confirm acceptance and non-EU operator eligibility, then select **Agree and activate model**. The authenticated endpoint sends `{"prompt":"agree"}` to Workers AI. No license is automatically accepted on an upload or on deployment. Activation failure leaves assessment unavailable and does not count as a user violation.
 
-```sh
-curl "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/@cf/meta/llama-3.2-11b-vision-instruct" \
-  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data '{"prompt":"agree"}'
-```
+Before uploading, users must explicitly accept the [Terms of Service](/terms.html), model license/policy and eligibility statement. Upload controls (including paste and drag/drop) appear only after acceptance. The accepted version is stored in the browser; **Review consent** clears it. All `POST /upload` clients, including exempt IPs, must send `X-Terms-Version: 2026-10-07` after obtaining agreement; missing/outdated versions return 428 before reading the image or calling AI/GitHub. This header is a client declaration, not identity verification or a server-side consent audit. When terms change, update both `src/terms.ts` and `public/terms.html` so users must accept again.
 
 The public uploader and administration interface do not display AI assessment details. They show generic upload errors, violation warnings and temporary suspensions where applicable. An AI binding is declared in Wrangler; no AI API key is embedded in the application. Local Workers AI calls use Cloudflare's remote service and can incur usage.
 
@@ -65,7 +60,7 @@ IP location previews use [Cloudflare request metadata](https://developers.cloudf
    ```
 
 4. Configure your Worker custom domain/route in Cloudflare (`workers_dev` is disabled), or enable `workers_dev` in the shared configuration for a workers.dev URL. Keep any production routes and preview settings in your deployment configuration so that deployments do not overwrite dashboard settings unexpectedly.
-5. Complete the model activation described above, then validate and deploy:
+5. Validate and deploy, then complete the model activation described above before assessed uploads:
 
    ```sh
    pnpm typecheck

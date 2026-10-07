@@ -9,6 +9,7 @@ import {
 } from '@mui/material';
 import { CloudUpload } from '@mui/icons-material';
 import { prepareImage } from '../prepareImage.ts';
+import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
 
 const UploadBox = styled(Paper)(({ theme }) => ({
   border: `2px dashed ${theme.palette.divider}`,
@@ -53,7 +54,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
             body: imageData,
             method: 'POST',
             headers: {
-              'Content-Type': 'text/plain'
+              'Content-Type': 'text/plain',
+              [CONSENT_HEADER]: TERMS_VERSION,
             }
           });
 

@@ -9,6 +9,7 @@ import { recordViolation, getIpControl, updateIpControl, normalizeIp, VIOLATION_
 import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution } from '../src/worker/repositories/management.ts';
 import { getTrafficStats, recordTraffic, pruneActivity, listIpOverview, requestLocation } from '../src/worker/repositories/traffic.ts';
 import { RETENTION_MS } from '../src/worker/constants.ts';
+import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
 
 const id = 'a'.repeat(32);
 const second = 'b'.repeat(32);
@@ -67,7 +68,7 @@ test('upload initializes D1, previews do not renew and conditional views do rene
         }
         return new Response('image bytes');
     });
-    const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', body: 'data:image/jpeg;base64,aGVsbG8=' }), env, ctx);
+    const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: 'data:image/jpeg;base64,aGVsbG8=' }), env, ctx);
     assert.match(await response.text(), /^[a-z]{32}$/);
     assert.equal(uploaded.length, 32);
     assert.ok(await getAccessTime(env, uploaded));
@@ -172,8 +173,56 @@ function adminRequest(path: string, init: RequestInit = {}, password = 'test-pas
     return new Request(`https://image.test/api/admin${path}`, { ...init, headers: { 'Authorization': `Bearer ${password}`, 'Content-Type': 'application/json', ...init.headers } });
 }
 function uploadRequest(ip = '203.0.113.1') {
-    return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip }, body: 'data:image/jpeg;base64,aGVsbG8=' });
+    return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip, [CONSENT_HEADER]: TERMS_VERSION }, body: 'data:image/jpeg;base64,aGVsbG8=' });
 }
+
+test('uploads require current consent before reading data or invoking AI, including exempt IPs', async t => {
+    const { env, ctx, pending } = fixture();
+    await updateIpControl(env, '203.0.113.1', 'exempt');
+    let calls = 0;
+    t.mock.method(env.AI, 'run', async () => { calls++; throw new Error('Unexpected AI call'); });
+    t.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('Unexpected GitHub call'); });
+    for (const version of [null, 'old-version']) {
+        const headers = new Headers({ 'CF-Connecting-IP': '203.0.113.1' });
+        if (version) headers.set(CONSENT_HEADER, version);
+        const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers, body: 'invalid' }), env, ctx);
+        assert.equal(response.status, 428);
+        assert.match(await response.text(), /accept.*Terms of Service/);
+    }
+    await Promise.all(pending);
+    assert.equal(calls, 0);
+    assert.equal(await getAccessTime(env, id), null);
+});
+
+test('model activation requires authenticated explicit operator agreement and eligibility', async t => {
+    const { env, ctx } = fixture();
+    const calls: unknown[][] = [];
+    t.mock.method(env.AI, 'run', async (...args) => { calls.push(args); return { response: 'accepted' }; });
+    const path = '/model-license';
+    const accepted = JSON.stringify({ agree: true, nonEuOperator: true });
+    assert.equal((await worker.fetch(adminRequest(path, { method: 'POST', body: accepted }, 'wrong'), env, ctx)).status, 401);
+    assert.equal((await worker.fetch(adminRequest(path, { method: 'POST', headers: { Origin: 'https://other.test' }, body: accepted }), env, ctx)).status, 403);
+    for (const body of ['invalid', '{}', '{"agree":true}', '{"agree":"true","nonEuOperator":true}', '{"agree":true,"nonEuOperator":false}']) {
+        assert.equal((await worker.fetch(adminRequest(path, { method: 'POST', body }), env, ctx)).status, 400);
+    }
+    assert.equal(calls.length, 0);
+    const response = await worker.fetch(adminRequest(path, { method: 'POST', body: accepted }), env, ctx);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    assert.deepEqual(calls, [['@cf/meta/llama-3.2-11b-vision-instruct', { prompt: 'agree' }]]);
+});
+
+test('failed account activation returns failure and license errors never auto-accept or record violations', async t => {
+    const { env, ctx, pending } = fixture();
+    let calls = 0;
+    t.mock.method(console, 'error', () => {});
+    t.mock.method(env.AI, 'run', async () => { calls++; throw new Error('AiError: 5016: submit agree'); });
+    assert.equal((await worker.fetch(adminRequest('/model-license', { method: 'POST', body: '{"agree":true,"nonEuOperator":true}' }), env, ctx)).status, 500);
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 503);
+    await Promise.all(pending);
+    assert.equal(calls, 2);
+    assert.equal(await getIpControl(env, '203.0.113.1'), null);
+});
 
 test('admin APIs require credentials, reject cross-origin changes and validate lock input', async () => {
     const { env, ctx } = fixture();
@@ -270,7 +319,7 @@ test('traffic counts actual image response bytes, rejected requests and distinct
     t.mock.method(globalThis, 'fetch', async () => new Response('1234567890'));
     const response = await worker.fetch(new Request(`https://image.test/${id}?search`, { headers: { 'CF-Connecting-IP': '203.0.113.1' } }), env, ctx);
     await response.text();
-    await worker.fetch(new Request('https://image.test/upload', { method: 'POST', body: 'invalid', headers: { 'CF-Connecting-IP': '203.0.113.2' } }), env, ctx);
+    await worker.fetch(new Request('https://image.test/upload', { method: 'POST', body: 'invalid', headers: { 'CF-Connecting-IP': '203.0.113.2', [CONSENT_HEADER]: TERMS_VERSION } }), env, ctx);
     await Promise.all(pending);
     const stats = await getTrafficStats(env, 7);
     assert.equal(stats.totals.ips, 2);
@@ -378,7 +427,7 @@ test('PNG and WebP uploads preserve bytes, file extensions and response MIME typ
     // A transparent one-pixel PNG must survive the complete storage round trip.
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
     for (const [extension, bytes] of [['png', png], ['webp', 'UklGRg==']]) {
-        const upload = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', body: `data:image/${extension};base64,${bytes}` }), env, ctx);
+        const upload = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: `data:image/${extension};base64,${bytes}` }), env, ctx);
         assert.equal(upload.status, 200);
         const imageId = await upload.text();
         assert.equal(stored.get(`${imageId}.${extension}`), bytes);

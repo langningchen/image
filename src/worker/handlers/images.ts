@@ -5,6 +5,7 @@ import { moderateImage } from '../services/moderation.ts';
 import { clientIp, getIpControl, recordViolation, WARNING_THRESHOLD } from '../repositories/ip-controls.ts';
 import { saveModeration } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
+import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
 
 function imageResponseHeaders(imageId: string, extension: string): HeadersInit {
     return {
@@ -22,6 +23,9 @@ function imageResponseHeaders(imageId: string, extension: string): HeadersInit {
 
 export async function handleUpload(request: Request, env: Env, metrics = { bytes: 0 }): Promise<Response> {
     const failure = (message: string, status: number) => new Response(message, { status, headers: corsHeaders });
+    if (request.headers.get(CONSENT_HEADER) !== TERMS_VERSION) {
+        return failure('Please read and accept the current Terms of Service at /terms.html before uploading.', 428);
+    }
     const ip = clientIp(request);
     let control;
     try { control = await getIpControl(env, ip); } catch { return failure('Upload temporarily unavailable', 503); }
