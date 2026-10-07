@@ -10,6 +10,8 @@ import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution } f
 import { getTrafficStats, recordTraffic, pruneActivity, listIpOverview, requestLocation } from '../src/worker/repositories/traffic.ts';
 import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
+import { setFallback, getFallback } from '../src/worker/repositories/assessment.ts';
+import { parseVerdict, AssessmentError, moderateImage } from '../src/worker/services/moderation.ts';
 
 const id = 'a'.repeat(32);
 const second = 'b'.repeat(32);
@@ -19,6 +21,7 @@ function fixture() {
     sqlite.exec(readFileSync(new URL('../migrations/0002_image_management.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0003_upload_controls_and_traffic.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0004_ip_geolocation.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/0005_moderation_fallback.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
@@ -214,6 +217,7 @@ test('model activation requires authenticated explicit operator agreement and el
 
 test('failed account activation returns failure and license errors never auto-accept or record violations', async t => {
     const { env, ctx, pending } = fixture();
+    await setFallback(env, 'deny');
     let calls = 0;
     t.mock.method(console, 'error', () => {});
     t.mock.method(env.AI, 'run', async () => { calls++; throw new Error('AiError: 5016: submit agree'); });
@@ -298,12 +302,14 @@ test('IP exemption skips AI but explicit bans still prevent upload; admin can re
     await updateIpControl(env, ip, 'unban');
     assert.equal((await worker.fetch(uploadRequest(ip), env, ctx)).status, 200);
     await updateIpControl(env, ip, 'unexempt');
+    await setFallback(env, 'deny');
     assert.equal((await worker.fetch(uploadRequest(ip), env, ctx)).status, 503);
     await Promise.all(pending);
 });
 
-test('AI failures, inconclusive replies and malformed verdicts fail closed without strikes', async t => {
+test('deny fallback rejects inconclusive and malformed verdicts without strikes', async t => {
     const { env, ctx, pending } = fixture();
+    await setFallback(env, 'deny');
     t.mock.method(console, 'error', () => {});
     t.mock.method(globalThis, 'fetch', () => { throw new Error('Unreviewed data reached GitHub'); });
     for (const response of ['not json', '{"approved":"true","reason":"safe"}', '{"approved":false,"reason":"unassessable"}', '{"approved":true,"reason":"explicit_sexual"}']) {
@@ -458,4 +464,212 @@ test('cleanup recognizes PNG and WebP paths and preserves locked images', async 
     assert.ok(deleted[0].endsWith(`${id}.png`));
     assert.equal(await getAccessTime(env, id), null);
     assert.ok(sqlite.prepare('SELECT locked FROM image_access WHERE image_id = ?').get(second)?.locked);
+});
+
+test('verdict parser accepts JSON and a single framed verdict but rejects prose and conflicting data', () => {
+    for (const response of ['{"approved":true,"reason":"safe"}', '```json\n{"approved":true,"reason":"safe"}\n```', 'Assessment result:\n{"approved":true,"reason":"safe"}\nEnd.']) {
+        assert.deepEqual(parseVerdict(response), { approved: true, reason: 'safe' });
+    }
+    assert.deepEqual(parseVerdict('{"approved":false,"reason":"graphic_violence"}'), { approved: false, reason: 'graphic_violence' });
+    for (const response of ['The image shows a landscape.', '{"approved":true,"reason":"safe"} {"approved":false,"reason":"graphic_violence"}', '{"approved":true,"reason":"safe","extra":1}', '{"approved":true,"reason":"graphic_violence"}', '{"approved":false,"reason":"unassessable"}', '{"approved":true}', '{bad json}', '[]', null]) {
+        assert.throws(() => parseVerdict(response), AssessmentError);
+    }
+});
+
+test('assessment uses an explicit vision prompt and times out without waiting indefinitely', async t => {
+    const { env } = fixture();
+    let input: any;
+    t.mock.method(env.AI, 'run', async (_, value) => { input = value; return { response: '{"approved":true,"reason":"safe"}' }; });
+    assert.equal((await moderateImage(env, 'data:image/png;base64,aGVsbG8=')).approved, true);
+    assert.equal(input.image, 'data:image/png;base64,aGVsbG8=');
+    assert.match(input.prompt, /Output the JSON verdict/);
+    assert.equal(input.temperature, 0);
+    const originalTimeout = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (callback: () => void) => originalTimeout(callback, 0));
+    t.mock.method(env.AI, 'run', () => new Promise(() => {}));
+    await assert.rejects(moderateImage(env, 'data:image/png;base64,aGVsbG8='), (error: AssessmentError) => error.code === 'timeout');
+});
+
+test('default allow fallback uploads non-JSON responses and provider failures into the review queue', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    t.mock.method(console, 'error', () => {});
+    let writes = 0;
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        assert.equal(init.method, 'PUT'); writes++;
+        const imageId = new URL(url).pathname.split('/').at(-1).split('.')[0];
+        // Audit and review metadata must already exist before storing the bytes.
+        assert.equal(sqlite.prepare('SELECT moderation_status FROM image_access WHERE image_id = ?').get(imageId).moderation_status, 'error');
+        assert.equal(sqlite.prepare('SELECT outcome FROM assessment_audit WHERE image_id = ?').get(imageId).outcome, 'pending');
+        return Response.json({ content: { name: `${imageId}.jpeg` } });
+    });
+    assert.equal(await getFallback(env), 'allow');
+    const failures = ['The image shows a landscape.', '{"approved":false,"reason":"unassessable"}', 'provider'];
+    for (const failure of failures) {
+        env.AI.run = async () => {
+            if (failure === 'provider') throw new Error('AI unavailable');
+            return { response: failure };
+        };
+        const response = await worker.fetch(uploadRequest(), env, ctx);
+        assert.equal(response.status, 200);
+        const imageId = await response.text();
+        assert.match(imageId, /^[a-z]{32}$/);
+        const image = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(imageId);
+        assert.equal(image.moderation_status, 'error');
+        assert.equal(image.uploader_ip, '203.0.113.1');
+        assert.ok(image.moderation_error);
+        assert.equal(image.moderation_response, failure === 'provider' ? null : failure);
+    }
+    await Promise.all(pending);
+    assert.equal(writes, 3);
+    assert.equal(await getIpControl(env, '203.0.113.1'), null);
+    const events = (await (await worker.fetch(adminRequest('/assessment-audit'), env, ctx)).json()).events;
+    assert.equal(events.length, 3);
+    assert.ok(events.every(event => event.action === 'fallback_allow' && event.outcome === 'uploaded' && event.current_status === 'error'));
+    const settings = await (await worker.fetch(adminRequest('/moderation-settings'), env, ctx)).json();
+    assert.deepEqual(settings.counts, [{ status: 'error', count: 3 }]);
+});
+
+test('fallback settings require authentication, validate inputs and denied attempts retain audit without image bytes', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    t.mock.method(console, 'error', () => {});
+    t.mock.method(globalThis, 'fetch', () => { throw new Error('Denied data reached storage'); });
+    for (const path of ['/moderation-settings', '/assessment-audit']) {
+        assert.equal((await worker.fetch(adminRequest(path, {}, 'wrong'), env, ctx)).status, 401);
+    }
+    assert.equal((await worker.fetch(adminRequest('/moderation-settings', { method: 'PATCH', body: '{"fallback":"deny"}', headers: { Origin: 'https://other.test' } }), env, ctx)).status, 403);
+    for (const body of ['{}', '{"fallback":true}', '{"fallback":"invalid"}', 'invalid']) {
+        assert.equal((await worker.fetch(adminRequest('/moderation-settings', { method: 'PATCH', body }), env, ctx)).status, 400);
+    }
+    assert.equal(await getFallback(env), 'allow');
+    assert.equal((await worker.fetch(adminRequest('/moderation-settings', { method: 'PATCH', body: '{"fallback":"deny"}' }), env, ctx)).status, 200);
+    assert.equal(await getFallback(env), 'deny');
+    env.AI.run = async () => ({ response: 'The image shows a landscape.' });
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 503);
+    assert.equal(await getIpControl(env, '203.0.113.1'), null);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM image_access').get().count, 0);
+    const event = sqlite.prepare('SELECT * FROM assessment_audit').get();
+    assert.equal(event.action, 'fallback_deny');
+    assert.equal(event.outcome, 'denied');
+    assert.equal(event.image_id, null);
+    assert.equal(event.model_response, 'The image shows a landscape.');
+    await Promise.all(pending);
+});
+
+test('fallback refuses unaudited uploads when D1 persistence fails; failed storage removes reserved metadata', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    t.mock.method(console, 'error', () => {});
+    env.AI.run = async () => ({ response: 'The image shows a landscape.' });
+    let writes = 0;
+    t.mock.method(globalThis, 'fetch', async () => { writes++; return new Response('Conflict', { status: 409 }); });
+    const originalBatch = env.DB.batch;
+    env.DB.batch = async () => { throw new Error('D1 unavailable'); };
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 503);
+    assert.equal(writes, 0);
+    env.DB.batch = originalBatch;
+    assert.equal((await worker.fetch(uploadRequest(), env, ctx)).status, 500);
+    assert.equal(writes, 1);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM image_access').get().count, 0);
+    assert.equal(sqlite.prepare('SELECT outcome FROM assessment_audit').get().outcome, 'storage_failed');
+    await Promise.all(pending);
+});
+
+test('filtered review queue and audit history paginate without skipping matching records', async () => {
+    const { env, ctx, sqlite } = fixture();
+    for (let index = 0; index < 60; index++) {
+        const key = 'z'.repeat(30) + String.fromCharCode(97 + Math.floor(index / 26)) + String.fromCharCode(97 + index % 26);
+        await recordAccess(env, key, 100);
+        sqlite.prepare("UPDATE image_access SET moderation_status = 'error' WHERE image_id = ?").run(key);
+        sqlite.prepare("INSERT INTO assessment_audit (action, outcome, created_at) VALUES ('fallback_deny', 'denied', ?)").run(index);
+    }
+    await recordAccess(env, id, 100);
+    const first = await (await worker.fetch(adminRequest('/images?status=error'), env, ctx)).json();
+    assert.equal(first.images.length, 50);
+    const secondPage = await (await worker.fetch(adminRequest(`/images?status=error&cursor=${first.nextCursor}`), env, ctx)).json();
+    assert.equal(secondPage.images.length, 10);
+    assert.equal(secondPage.nextCursor, null);
+    assert.equal(new Set([...first.images, ...secondPage.images].map(row => row.image_id)).size, 60);
+    assert.equal((await worker.fetch(adminRequest('/images?status=invalid'), env, ctx)).status, 400);
+    const audit = await (await worker.fetch(adminRequest('/assessment-audit'), env, ctx)).json();
+    assert.equal(audit.events.length, 50);
+    const older = await (await worker.fetch(adminRequest(`/assessment-audit?cursor=${audit.nextCursor}`), env, ctx)).json();
+    assert.equal(older.events.length, 10);
+    assert.equal(older.nextCursor, null);
+    assert.equal(new Set([...audit.events, ...older.events].map(row => row.id)).size, 60);
+    for (const cursor of ['0', '-1', '1.5', 'abc']) {
+        assert.equal((await worker.fetch(adminRequest(`/assessment-audit?cursor=${cursor}`), env, ctx)).status, 400);
+    }
+});
+
+test('manual approval preserves failure evidence and manual removal deletes PNG with durable audit history', async t => {
+    const { env, ctx, sqlite } = fixture();
+    await recordAccess(env, id, 100);
+    sqlite.prepare("UPDATE image_access SET moderation_status = 'error', moderation_error = 'invalid_json', moderation_response = 'The image shows a landscape.', uploader_ip = '203.0.113.1' WHERE image_id = ?").run(id);
+    const request = (action: string) => adminRequest(`/images/${id}/review`, { method: 'POST', body: JSON.stringify({ action }) });
+    assert.equal((await worker.fetch(adminRequest(`/images/${id}/review`, { method: 'POST', body: '{"action":"approve"}' }, 'wrong'), env, ctx)).status, 401);
+    assert.equal((await worker.fetch(request('unknown'), env, ctx)).status, 400);
+    assert.equal((await worker.fetch(request('approve'), env, ctx)).status, 200);
+    let row = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(id);
+    assert.equal(row.moderation_status, 'approved');
+    assert.equal(row.moderation_reason, 'manual_approved');
+    assert.equal(row.moderation_response, 'The image shows a landscape.');
+    assert.equal(sqlite.prepare('SELECT action FROM assessment_audit').get().action, 'manual_approve');
+    await setLocked(env, id, true);
+    assert.equal((await worker.fetch(request('remove'), env, ctx)).status, 409);
+    await setLocked(env, id, false);
+    let removed = false;
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        if (!String(url).endsWith('.png')) return new Response(null, { status: 404 });
+        if (init.method === 'DELETE') {
+            assert.equal(JSON.parse(init.body).sha, 'sha');
+            assert.match(JSON.parse(init.body).message, /manual moderation/);
+            removed = true; return Response.json({});
+        }
+        return Response.json({ sha: 'sha' });
+    });
+    assert.equal((await worker.fetch(request('remove'), env, ctx)).status, 200);
+    assert.equal(removed, true);
+    assert.equal(await getAccessTime(env, id), null);
+    const events = (await (await worker.fetch(adminRequest('/assessment-audit'), env, ctx)).json()).events;
+    assert.equal(events.length, 2);
+    assert.equal(events[0].action, 'manual_remove');
+    assert.equal(events[0].outcome, 'removed');
+    assert.equal(events[0].current_status, null);
+    assert.equal(events[1].model_response, 'The image shows a landscape.');
+    assert.equal((await worker.fetch(request('approve'), env, ctx)).status, 409);
+});
+
+test('failed manual removal releases deletion claim and retains flagged image for retry', async t => {
+    const { env, ctx, sqlite } = fixture();
+    t.mock.method(console, 'error', () => {});
+    await recordAccess(env, id, 100);
+    t.mock.method(globalThis, 'fetch', async (_, init) => init.method === 'DELETE' ? new Response('Conflict', { status: 409 }) : Response.json({ sha: 'sha' }));
+    assert.equal((await worker.fetch(adminRequest(`/images/${id}/review`, { method: 'POST', body: '{"action":"remove"}' }), env, ctx)).status, 500);
+    const row = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(id);
+    assert.equal(row.deleting, 0);
+    assert.equal(row.moderation_status, 'flagged');
+    assert.equal(sqlite.prepare('SELECT outcome FROM assessment_audit').get().outcome, 'storage_failed');
+});
+
+test('assessment audits expire after 90 days while current review evidence remains', async () => {
+    const { env, sqlite } = fixture();
+    const now = Date.now();
+    await recordAccess(env, id, now);
+    sqlite.prepare("UPDATE image_access SET moderation_status = 'error', moderation_error = 'invalid_json' WHERE image_id = ?").run(id);
+    sqlite.prepare("INSERT INTO assessment_audit (image_id, action, outcome, created_at) VALUES (?, 'fallback_allow', 'uploaded', ?)").run(id, now - 91 * 86400000);
+    sqlite.prepare("INSERT INTO assessment_audit (action, outcome, created_at) VALUES ('fallback_deny', 'denied', ?)").run(now);
+    await pruneActivity(env, now);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM assessment_audit').get().count, 1);
+    assert.equal(sqlite.prepare('SELECT moderation_error FROM image_access WHERE image_id = ?').get(id).moderation_error, 'invalid_json');
+});
+
+test('cleanup does not erase a recent fallback reservation from a stale GitHub tree snapshot', async t => {
+    const { env, sqlite } = fixture();
+    const now = Date.now();
+    await recordAccess(env, id, now - 1000);
+    sqlite.prepare("UPDATE image_access SET moderation_status = 'error', uploaded_at = ? WHERE image_id = ?").run(now - 1000, id);
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ tree: [] }));
+    await cleanupInactiveImages(env, now);
+    assert.notEqual(await getAccessTime(env, id), null);
+    await cleanupInactiveImages(env, now + 60 * 60 * 1000 + 1);
+    assert.equal(await getAccessTime(env, id), null);
 });

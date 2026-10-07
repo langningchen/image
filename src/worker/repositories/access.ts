@@ -43,6 +43,8 @@ export async function removeAccess(env: Env, imageId: string): Promise<void> {
 export async function removeAccessBatch(env: Env, imageIds: string[], snapshotTime: number): Promise<void> {
     if (!imageIds.length) return;
     await env.DB.batch(imageIds.map(id => env.DB.prepare(
-        'DELETE FROM image_access WHERE image_id = ? AND last_accessed_at < ?',
-    ).bind(id, snapshotTime)));
+        // A fallback upload reserves its audit metadata before GitHub stores the
+        // bytes. A stale repository snapshot must not remove that reservation.
+        'DELETE FROM image_access WHERE image_id = ? AND last_accessed_at < ? AND (uploaded_at IS NULL OR uploaded_at < ?)',
+    ).bind(id, snapshotTime, snapshotTime - 60 * 60 * 1000)));
 }

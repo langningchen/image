@@ -56,7 +56,7 @@ export async function listCurrentImages(env: Env): Promise<Map<string, string>> 
     return imageIds;
 }
 
-export async function deleteImageFromGithub(env: Env, imageId: string, extension = 'jpeg'): Promise<void> {
+export async function deleteImageFromGithub(env: Env, imageId: string, extension = 'jpeg', reason = 'after 7 days without access'): Promise<void> {
     const contentUrl = githubApiUrl(env, `/contents/${imageId}.${extension}`);
     const metadataResponse = await fetch(contentUrl, { headers: githubHeaders(env) });
 
@@ -79,7 +79,7 @@ export async function deleteImageFromGithub(env: Env, imageId: string, extension
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-            message: `Delete ${imageId}.${extension} after 7 days without access`,
+            message: `Delete ${imageId}.${extension} ${reason}`,
             sha: metadata.sha,
         }),
     });

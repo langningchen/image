@@ -100,7 +100,7 @@ const App: React.FC = () => {
         }} />}
         <Typography variant="body2" sx={{ mb: 3 }}>
           Built with Llama · <Link href="/terms.html" target="_blank" rel="noopener">Terms of Service</Link>
-          {consented && <> · <Link component="button" onClick={() => {
+          {consented && <> · <Link component="button" type="button" sx={{ verticalAlign: 'baseline' }} onClick={() => {
             try { localStorage.removeItem('acceptedTermsVersion'); } catch { /* Session state still resets. */ }
             setConsented(false);
           }}>Review consent</Link></>}

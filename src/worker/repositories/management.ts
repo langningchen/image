@@ -10,12 +10,16 @@ export interface ManagedImage {
     moderation_status: 'pending' | 'approved' | 'flagged' | 'error';
     moderation_reason: string | null;
     moderated_at: number | null;
+    uploader_ip: string | null;
+    uploaded_at: number | null;
+    moderation_error: string | null;
+    moderation_response: string | null;
 }
 
-export async function listImages(env: Env, cursor: string): Promise<ManagedImage[]> {
+export async function listImages(env: Env, cursor: string, status = ''): Promise<ManagedImage[]> {
     const { results } = await env.DB.prepare(
-        'SELECT * FROM image_access WHERE image_id > ? ORDER BY image_id LIMIT 51',
-    ).bind(cursor).all<ManagedImage>();
+        'SELECT * FROM image_access WHERE image_id > ? AND (? = \'\' OR moderation_status = ?) ORDER BY image_id LIMIT 51',
+    ).bind(cursor, status, status).all<ManagedImage>();
     return results;
 }
 

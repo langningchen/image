@@ -3,6 +3,8 @@ import { normalizeIp, updateIpControl } from '../repositories/ip-controls.ts';
 import { getTrafficStats, listIpOverview } from '../repositories/traffic.ts';
 import { IMAGE_ID_PATTERN } from '../constants.ts';
 import { listImages, setLocked, getRetentionDistribution } from '../repositories/management.ts';
+import { getFallback, setFallback, listAudit, moderationCounts, approveImage, claimRemoval, finishRemoval } from '../repositories/assessment.ts';
+import { deleteImageFromGithub } from '../repositories/github.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -28,6 +30,46 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return json({ error: 'Forbidden' }, 403);
     try {
+        if (url.pathname === '/api/admin/moderation-settings') {
+            if (request.method === 'GET') return json({ fallback: await getFallback(env), counts: await moderationCounts(env) });
+            if (request.method === 'PATCH') {
+                let body: unknown;
+                try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
+                if (!body || typeof body !== 'object' || !('fallback' in body) || (body.fallback !== 'allow' && body.fallback !== 'deny')) {
+                    return json({ error: 'Fallback must be allow or deny' }, 400);
+                }
+                await setFallback(env, body.fallback);
+                return json({ fallback: body.fallback });
+            }
+        }
+        if (request.method === 'GET' && url.pathname === '/api/admin/assessment-audit') {
+            const cursor = url.searchParams.get('cursor');
+            const before = cursor === null ? Number.MAX_SAFE_INTEGER : Number(cursor);
+            if (!Number.isSafeInteger(before) || before <= 0) return json({ error: 'Invalid cursor' }, 400);
+            return json(await listAudit(env, before));
+        }
+        const review = url.pathname.match(/^\/api\/admin\/images\/([a-z]{32})\/review$/);
+        if (request.method === 'POST' && review) {
+            let body: unknown;
+            try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
+            if (!body || typeof body !== 'object' || !('action' in body) || !['approve', 'remove'].includes(String(body.action))) {
+                return json({ error: 'Invalid review action' }, 400);
+            }
+            const imageId = review[1];
+            if (body.action === 'approve') {
+                return await approveImage(env, imageId) ? json({ success: true }) : json({ error: 'Image unavailable or being deleted' }, 409);
+            }
+            if (!(await claimRemoval(env, imageId))) return json({ error: 'Unlock the image first; it may be unavailable or being deleted' }, 409);
+            try {
+                // Check each supported extension; legacy records do not store it.
+                for (const extension of ['jpeg', 'png', 'webp']) await deleteImageFromGithub(env, imageId, extension, 'after manual moderation review');
+            } catch (error) {
+                await finishRemoval(env, imageId, false);
+                throw error;
+            }
+            await finishRemoval(env, imageId, true);
+            return json({ success: true });
+        }
         if (request.method === 'POST' && url.pathname === '/api/admin/model-license') {
             let body: unknown;
             try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
@@ -42,7 +84,9 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
         if (request.method === 'GET' && url.pathname === '/api/admin/images') {
             const cursor = url.searchParams.get('cursor') ?? '';
             if (cursor && !IMAGE_ID_PATTERN.test(cursor)) return json({ error: 'Invalid cursor' }, 400);
-            const rows = await listImages(env, cursor);
+            const status = url.searchParams.get('status') ?? '';
+            if (!['', 'pending', 'approved', 'flagged', 'error'].includes(status)) return json({ error: 'Invalid moderation status' }, 400);
+            const rows = await listImages(env, cursor, status);
             const images = rows.slice(0, 50);
             return json({ images, nextCursor: rows.length > 50 ? images[49].image_id : null });
         }

@@ -116,5 +116,6 @@ export async function pruneActivity(env: Env, now: number): Promise<void> {
     await env.DB.batch([
         env.DB.prepare('DELETE FROM traffic_daily WHERE day < ?').bind(new Date(cutoff).toISOString().slice(0, 10)),
         env.DB.prepare('DELETE FROM moderation_events WHERE created_at < ?').bind(cutoff),
+        env.DB.prepare('DELETE FROM assessment_audit WHERE created_at < ?').bind(cutoff),
     ]);
 }

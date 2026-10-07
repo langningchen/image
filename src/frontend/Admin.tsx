@@ -1,7 +1,7 @@
 import IpLocation, { type IpDetails } from './components/IpLocation';
 import AdminAnalytics, { type Stats } from './components/AdminAnalytics';
 import { useState } from 'react';
-import { Alert, Box, Button, Card, CardContent, CardMedia, Checkbox, FormControlLabel, Link, Chip, Container, CssBaseline, Stack, TextField, Typography, Tabs, Tab } from '@mui/material';
+import { Alert, Box, Button, Card, CardContent, CardMedia, Checkbox, FormControlLabel, Link, Chip, Container, CssBaseline, Stack, TextField, Typography, Tabs, Tab, MenuItem } from '@mui/material';
 import { LLAMA_LICENSE_URL, LLAMA_POLICY_URL } from '../terms.ts';
 
 interface ImageRow {
@@ -9,6 +9,32 @@ interface ImageRow {
   last_accessed_at: number;
   locked: number;
   deleting: number;
+  moderation_status: 'pending' | 'approved' | 'flagged' | 'error';
+  moderation_reason: string | null;
+  moderation_error: string | null;
+  moderation_response: string | null;
+  uploader_ip: string | null;
+  moderated_at: number | null;
+  uploaded_at: number | null;
+}
+
+interface AuditEvent {
+  id: number;
+  image_id: string | null;
+  ip: string | null;
+  action: string;
+  error: string | null;
+  model_response: string | null;
+  outcome: string;
+  created_at: number;
+  current_status: string | null;
+}
+
+function FailureDetails({ error, response }: { error: string | null; response: string | null }) {
+  return <>
+    {error && <Typography variant="caption" color="error" sx={{ display: 'block', overflowWrap: 'anywhere' }}>{error}</Typography>}
+    {response && <Box component="details" sx={{ mt: .5 }}><Typography component="summary" variant="caption" sx={{ cursor: 'pointer' }}>Model response (untrusted text)</Typography><Box component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 11, maxHeight: 180, overflow: 'auto' }}>{response}</Box></Box>}
+  </>;
 }
 
 export default function Admin() {
@@ -28,6 +54,39 @@ export default function Admin() {
   const [licenseAccepted, setLicenseAccepted] = useState(false);
   const [operatorEligible, setOperatorEligible] = useState(false);
   const [modelActivated, setModelActivated] = useState(false);
+  const [fallback, setFallback] = useState<'allow' | 'deny'>('allow');
+  const [imageFilter, setImageFilter] = useState('');
+  const [counts, setCounts] = useState<{ status: string; count: number }[]>([]);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [auditCursor, setAuditCursor] = useState<number | null>(null);
+
+  async function changeFallback(value: 'allow' | 'deny') {
+    setBusy(true); setError('');
+    try {
+      const result = await api('/moderation-settings', credential, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fallback: value }) });
+      setFallback(result.fallback);
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function reviewImage(image: ImageRow, action: 'approve' | 'remove') {
+    if (action === 'remove' && !window.confirm('Remove this image from server storage? Existing cached copies and Git history may remain.')) return;
+    setBusy(true); setError('');
+    try {
+      await api(`/images/${image.image_id}/review`, credential, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      await load(credential);
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function moreAudit() {
+    setBusy(true); setError('');
+    try {
+      const result = await api(`/assessment-audit?cursor=${auditCursor}`, credential);
+      setAudit(previous => [...previous, ...result.events]); setAuditCursor(result.nextCursor);
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
 
   async function activateModel() {
     setBusy(true); setError(''); setModelActivated(false);
@@ -48,13 +107,16 @@ export default function Admin() {
     return result;
   }
 
-  async function load(token: string, next: string | null = null) {
+  async function load(token: string, next: string | null = null, filter = imageFilter) {
     setBusy(true); setError('');
     try {
-      const result = await api(`/images${next ? `?cursor=${next}` : ''}`, token);
+      const query = new URLSearchParams({ status: filter });
+      if (next) query.set('cursor', next);
+      const result = await api(`/images?${query}`, token);
       if (!next) {
-        const [traffic, controls] = await Promise.all([api(`/stats?days=${days}&sort=${order}`, token), api('/ips', token)]);
+        const [traffic, controls, settings, history] = await Promise.all([api(`/stats?days=${days}&sort=${order}`, token), api('/ips', token), api('/moderation-settings', token), api('/assessment-audit', token)]);
         setStats(traffic); setIps(controls.ips); setIpCursor(controls.nextCursor);
+        setFallback(settings.fallback); setCounts(settings.counts); setAudit(history.events); setAuditCursor(history.nextCursor);
       }
       setImages(previous => next ? [...previous, ...result.images] : result.images);
       setCursor(result.nextCursor);
@@ -111,7 +173,7 @@ export default function Admin() {
       <Typography variant="h5" sx={{ fontWeight: 600 }}>Image Administration</Typography>
       {credential && <Stack direction="row" spacing={.5}>
         <Button size="small" disabled={busy} onClick={() => load(credential)}>Refresh</Button>
-        <Button size="small" disabled={busy} onClick={() => { setCredential(''); setImages([]); setCursor(null); setStats(null); setIps([]); setError(''); }}>Sign out</Button>
+        <Button size="small" disabled={busy} onClick={() => { setCredential(''); setImages([]); setCursor(null); setStats(null); setIps([]); setAudit([]); setAuditCursor(null); setCounts([]); setLicenseAccepted(false); setOperatorEligible(false); setModelActivated(false); setError(''); }}>Sign out</Button>
       </Stack>}
     </Stack>}
     {credential && error && <Alert severity="error" sx={{ mb: 1.5 }}>{error}</Alert>}
@@ -123,10 +185,15 @@ export default function Admin() {
         <Button fullWidth variant="contained" type="submit" disabled={busy || !password}>Sign in</Button>
       </Box>
     </CardContent></Card></Box> : <>
-      <Tabs value={tab} onChange={(_, value) => setTab(value)} aria-label="Administration sections" sx={{ mb: 1.5, minHeight: 40, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { minHeight: 40, py: 1, minWidth: 80 } }}>
-        <Tab value="overview" label="Overview" /><Tab value="images" label="Images" /><Tab value="ips" label="IP controls" /><Tab value="model" label="Model setup" />
+      <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons="auto" aria-label="Administration sections" sx={{ mb: 1.5, minHeight: 40, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { minHeight: 40, py: 1, minWidth: 80 } }}>
+        <Tab value="overview" label="Overview" /><Tab value="images" label="Images / Review" /><Tab value="audit" label="Assessment audit" /><Tab value="ips" label="IP controls" /><Tab value="model" label="Model setup" />
       </Tabs>
       {tab === 'model' && <Card variant="outlined"><CardContent>
+        <Typography variant="h6">When AI assessment is unavailable</Typography>
+        <Typography variant="body2" sx={{ mb: 1 }}>Applies to provider errors, timeouts, malformed responses and inconclusive verdicts. Explicitly prohibited content is always rejected. Allowed fallback images are marked for manual review; denied attempts retain an audit record without storing the image.</Typography>
+        <TextField select label="AI failure fallback" size="small" value={fallback} disabled={busy} onChange={event => changeFallback(event.target.value as 'allow' | 'deny')} sx={{ mb: 3, minWidth: 250 }}>
+          <MenuItem value="allow">Allow upload (default)</MenuItem><MenuItem value="deny">Deny upload</MenuItem>
+        </TextField>
         <Typography variant="h6">Activate image assessment</Typography>
         <Typography variant="body2" sx={{ mb: 1 }}>Before the first assessed upload, the Cloudflare account operator must accept the model license. This sends the required “agree” prompt using this Worker's AI binding. Upload users' consent does not replace the operator's acceptance.</Typography>
         <FormControlLabel control={<Checkbox checked={licenseAccepted} onChange={event => setLicenseAccepted(event.target.checked)} />} label={<span>As the authorized account operator, I agree to the <Link href={LLAMA_LICENSE_URL} target="_blank" rel="noopener">Llama 3.2 Community License</Link> and <Link href={LLAMA_POLICY_URL} target="_blank" rel="noopener">Acceptable Use Policy</Link>.</span>} />
@@ -135,6 +202,7 @@ export default function Admin() {
         {modelActivated && <Alert severity="success" sx={{ mt: 2 }}>Cloudflare accepted the activation request. Image assessment is ready.</Alert>}
       </CardContent></Card>}
       {tab === 'overview' && <>
+        <Stack direction="row" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap' }}>{counts.map(row => <Chip key={row.status} label={`${row.status === 'error' ? 'Needs review' : row.status}: ${row.count}`} color={row.status === 'error' ? 'warning' : 'default'} onClick={() => { setTab('images'); setImageFilter(row.status); void load(credential, null, row.status); }} disabled={busy} />)}</Stack>
         <Stack direction="row" spacing={.75} sx={{ mb: 1.5 }}>{[7, 30, 90].map(value => <Button size="small" key={value} disabled={busy} variant={days === value ? 'contained' : 'outlined'} onClick={() => changeDays(value)}>Last {value} days</Button>)}</Stack>
         <AdminAnalytics stats={stats} busy={busy} order={order} onOrderChange={changeOrder} />
       </>}
@@ -158,6 +226,9 @@ export default function Admin() {
         </CardContent></Card>)}{!ips.length && <Typography color="text.secondary">No IP controls configured</Typography>}{ipCursor && <Button disabled={busy} onClick={moreIps}>Load more IPs</Button>}</Stack>
       </>}
       {tab === 'images' && <>
+        <TextField select size="small" label="Moderation status" value={imageFilter} disabled={busy} onChange={event => { setImageFilter(event.target.value); void load(credential, null, event.target.value); }} sx={{ minWidth: 240, mb: 1.5 }}>
+          <MenuItem value="">All images</MenuItem><MenuItem value="error">AI failed / needs review</MenuItem><MenuItem value="pending">Pending / legacy</MenuItem><MenuItem value="approved">Approved / exempt</MenuItem><MenuItem value="flagged">Flagged</MenuItem>
+        </TextField>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>Locked images are retained. Unlocking resumes cleanup based on the last access time.</Typography>
         {!images.length && <Typography color="text.secondary">No images yet</Typography>}
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))', gap: 1 }}>
@@ -165,6 +236,16 @@ export default function Admin() {
             <CardMedia component="img" image={`/${image.image_id}?search`} alt="Image preview" loading="lazy" sx={{ height: 140, objectFit: 'contain', bgcolor: 'grey.100' }} />
             <CardContent>
               <Typography noWrap title={image.image_id} sx={{ fontFamily: 'monospace', fontSize: 11, mb: .5 }}>{image.image_id}</Typography>
+              <Chip size="small" color={image.moderation_status === 'error' ? 'warning' : image.moderation_status === 'flagged' ? 'error' : 'default'} label={image.moderation_status === 'error' ? 'AI failed · needs review' : image.moderation_status} />
+              <Typography variant="caption" sx={{ display: 'block' }}>{image.moderation_reason ?? 'No assessment'} · {image.uploader_ip ?? 'Unknown uploader'}</Typography>
+              {image.uploaded_at && <Typography variant="caption" sx={{ display: 'block' }}>Uploaded: {new Date(image.uploaded_at).toLocaleString()}</Typography>}
+              {image.moderated_at && <Typography variant="caption" sx={{ display: 'block' }}>Reviewed: {new Date(image.moderated_at).toLocaleString()}</Typography>}
+              <FailureDetails error={image.moderation_error} response={image.moderation_response} />
+              <Stack direction="row" spacing={.5} sx={{ mt: 1 }}>
+                <Button size="small" disabled={busy || !!image.deleting || image.moderation_reason === 'manual_approved'} onClick={() => reviewImage(image, 'approve')}>Approve</Button>
+                <Button size="small" color="error" disabled={busy || !!image.deleting || !!image.locked} onClick={() => reviewImage(image, 'remove')}>Remove</Button>
+                <Link href={`/${image.image_id}?search`} target="_blank" rel="noopener" sx={{ fontSize: 12, alignSelf: 'center' }}>View</Link>
+              </Stack>
               <Typography variant="caption" color="text.secondary">{new Date(image.last_accessed_at).toLocaleString('en-US')}</Typography>
               <Typography variant="caption" sx={{ display: 'block' }}>{image.locked ? 'Retention paused' : image.deleting ? 'Cleanup in progress' : `Cleanup eligible in ${Math.max(0, Math.ceil((image.last_accessed_at + 7 * 86400000 - Date.now()) / 86400000))} days`}</Typography>
               <Stack direction="row" sx={{ mt: .75, alignItems: 'center', justifyContent: 'space-between' }}>
@@ -175,6 +256,21 @@ export default function Admin() {
           </Card>)}
         </Box>
         {cursor && <Button disabled={busy} onClick={() => load(credential, cursor)} sx={{ mt: 1.5 }}>Load more</Button>}
+      </>}
+      {tab === 'audit' && <>
+        <Typography variant="body2" sx={{ mb: 1.5 }}>AI failure decisions and manual reviews, retained for 90 days. Denied attempts have no stored image. Pending means the storage outcome has not been confirmed. Removed files may remain in caches or Git history.</Typography>
+        <Stack spacing={1}>{audit.map(event => <Card key={event.id} variant="outlined"><CardContent>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+            {event.image_id && event.current_status && <Box component="img" src={`/${event.image_id}?search`} alt="Audit image preview" loading="lazy" sx={{ width: 120, height: 100, objectFit: 'contain' }} />}
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography variant="body2">#{event.id} · {event.action} · {event.outcome}</Typography>
+              <Typography variant="caption">{new Date(event.created_at).toLocaleString()} · {event.ip ?? 'Unknown IP'} · Current: {event.current_status ?? 'No stored image'}</Typography>
+              {event.image_id && <Typography variant="caption" sx={{ display: 'block', overflowWrap: 'anywhere' }}>{event.image_id}</Typography>}
+              <FailureDetails error={event.error} response={event.model_response} />
+            </Box>
+          </Stack>
+        </CardContent></Card>)}{!audit.length && <Typography color="text.secondary">No assessment audit events</Typography>}</Stack>
+        {auditCursor && <Button disabled={busy} onClick={moreAudit} sx={{ mt: 1.5 }}>Load more audit events</Button>}
       </>}
     </>}
   </Container></>;

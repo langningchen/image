@@ -6,6 +6,7 @@ import { clientIp, getIpControl, recordViolation, WARNING_THRESHOLD } from '../r
 import { saveModeration } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
+import { assessmentFailure, getFallback, recordFallback, finishFallback, type FailureDetails } from '../repositories/assessment.ts';
 
 function imageResponseHeaders(imageId: string, extension: string): HeadersInit {
     return {
@@ -51,10 +52,21 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     const match = image.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
     if (!match || match[2].length % 4 !== 0) return failure('Invalid image data', 400);
     let verdict = { approved: true, reason: 'exempt' };
+    let assessmentError: FailureDetails | null = null;
     if (!control?.exempt) {
         try { verdict = await moderateImage(env, image); } catch (error) {
             console.error('Image assessment failed:', error);
-            return failure('Upload temporarily unavailable', 503);
+            assessmentError = assessmentFailure(error, env);
+            try {
+                if (await getFallback(env) === 'deny') {
+                    await recordFallback(env, null, ip, 'deny', assessmentError);
+                    return failure('Upload temporarily unavailable', 503);
+                }
+            } catch (auditError) {
+                console.error('Could not read fallback policy or record assessment failure:', auditError);
+                return failure('Upload temporarily unavailable', 503);
+            }
+            verdict = { approved: true, reason: assessmentError.code };
         }
         if (!verdict.approved) {
             try {
@@ -73,6 +85,19 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     for (const byte of crypto.getRandomValues(new Uint8Array(32))) {
         imageId += String.fromCharCode(byte % 26 + 97);
     }
+    let auditId: number | null = null;
+    if (assessmentError) {
+        try { auditId = await recordFallback(env, imageId, ip, 'allow', assessmentError); }
+        catch (error) {
+            console.error('Could not persist fallback audit:', error);
+            return failure('Upload temporarily unavailable', 503);
+        }
+    }
+    const finishAudit = async (uploaded: boolean) => {
+        if (auditId === null) return;
+        try { await finishFallback(env, auditId, imageId, uploaded); }
+        catch (error) { console.error('Could not finalize fallback audit:', imageId, error); }
+    };
 
     const extension = match[1].slice('image/'.length);
     const imageData = match[2];
@@ -98,6 +123,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
 
         if (!response.ok) {
             console.error('GitHub API error:', response.status, await response.text());
+            await finishAudit(false);
             return new Response('Upload failed', {
                 status: 500,
                 headers: corsHeaders,
@@ -107,6 +133,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
         const jsonResponse = await response.json() as GithubContentResponse;
         if (jsonResponse.content?.name !== `${imageId}.${extension}`) {
             console.error('Unexpected upload response:', jsonResponse);
+            // Storage may have succeeded despite an unexpected response; retain audit metadata.
             return new Response('Upload failed', {
                 status: 500,
                 headers: corsHeaders,
@@ -114,8 +141,13 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
         }
 
         try {
-            await recordAccess(env, imageId);
-            await saveModeration(env, imageId, 'approved', verdict.reason);
+            if (!assessmentError) {
+                await recordAccess(env, imageId);
+                await saveModeration(env, imageId, 'approved', verdict.reason);
+                await env.DB.prepare('UPDATE image_access SET uploader_ip = ?, uploaded_at = ? WHERE image_id = ?')
+                    .bind(ip, Date.now(), imageId).run();
+            }
+            await finishAudit(true);
         } catch (error) {
             // The daily reconciliation initializes missing records, so do not make a
             // successful GitHub upload look like a failure if D1 is temporarily down.
@@ -130,6 +162,8 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
         });
     } catch (error) {
         console.error('Upload error:', error);
+        // A transport failure can occur after GitHub writes the file. Keep the
+        // reserved error metadata and pending audit for reconciliation/manual review.
         return new Response('Upload failed', {
             status: 500,
             headers: corsHeaders,
