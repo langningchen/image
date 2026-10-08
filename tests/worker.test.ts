@@ -833,3 +833,18 @@ test('environment retention and AI configuration affect public configuration and
     assert.equal(stats.buckets[0].count, 1);
     await assert.rejects(() => getFallback({ ...env, AI_MODERATION_FALLBACK: 'invalid' }));
 });
+
+test('admin image filters combine retention, approval source and search before pagination', async () => {
+    const { env, ctx, sqlite } = fixture();
+    await recordAccess(env, id, Date.now());
+    await recordAccess(env, second, 1);
+    sqlite.prepare("UPDATE image_access SET moderation_status = 'approved', moderation_reason = 'safe', uploader_ip = '192.0.2.1' WHERE image_id = ?").run(id);
+    const request = (query: string) => worker.fetch(new Request(`https://image.test/api/admin/images?${query}`, { headers: { Authorization: 'Bearer test-password' } }), env, ctx);
+    const response = await request('status=approved&source=safe&retention=active&search=192.0.2.1');
+    assert.deepEqual((await response.json()).images.map((row: any) => row.image_id), [id]);
+    assert.deepEqual((await (await request('retention=due')).json()).images.map((row: any) => row.image_id), [second]);
+    assert.equal((await request('retention=invalid')).status, 400);
+    assert.equal((await request('source=invalid')).status, 400);
+    assert.equal((await request('search=%27%20OR%201=1')).status, 200);
+    assert.equal((await (await request('search=%27%20OR%201=1')).json()).images.length, 0);
+});

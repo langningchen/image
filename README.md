@@ -173,3 +173,5 @@ Set non-secret Worker variables in `wrangler.jsonc` under `vars` (or in the depl
 | `AI_MODERATION_FALLBACK` | unset | `allow` or `deny`; when set, overrides the persisted admin setting and prevents changing it through the admin API. |
 
 The public `/api/config` endpoint exposes the retention period and AI enabled flag only. Cleanup eligibility, admin cards and retention statistics use the same configured period. The daily cron remains configured through Wrangler `triggers.crons`.
+
+**Images / Review** supports combined server-side moderation status, retention state (locked, unlocked, deleting, expired, expiring within 24 hours, active), approval source, partial image ID and exact uploader IP filters. Search applies before pagination; resetting filters restores all images. Expiry filters use the configured inactivity period and exclude locked/deleting images.

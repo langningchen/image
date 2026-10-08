@@ -16,10 +16,21 @@ export interface ManagedImage {
     moderation_response: string | null;
 }
 
-export async function listImages(env: Env, cursor: string, status = ''): Promise<ManagedImage[]> {
+export async function listImages(env: Env, cursor: string, status = '', retention = '', source = '', search = ''): Promise<ManagedImage[]> {
+    const conditions = ['image_id > ?', "(? = '' OR moderation_status = ?)"];
+    const args: (string | number)[] = [cursor, status, status];
+    const cutoff = Date.now() - retentionMs(env);
+    if (retention === 'locked') conditions.push('locked = 1');
+    if (retention === 'unlocked') conditions.push('locked = 0 AND deleting = 0');
+    if (retention === 'deleting') conditions.push('deleting = 1');
+    if (retention === 'due') { conditions.push('locked = 0 AND deleting = 0 AND last_accessed_at <= ?'); args.push(cutoff); }
+    if (retention === 'active') { conditions.push('locked = 0 AND deleting = 0 AND last_accessed_at > ?'); args.push(cutoff); }
+    if (retention === 'soon') { conditions.push('locked = 0 AND deleting = 0 AND last_accessed_at > ? AND last_accessed_at <= ?'); args.push(cutoff, cutoff + 86400000); }
+    if (source) { conditions.push('moderation_reason = ?'); args.push(source); }
+    if (search) { conditions.push('(instr(image_id, ?) > 0 OR uploader_ip = ?)'); args.push(search, search); }
     const { results } = await env.DB.prepare(
-        'SELECT * FROM image_access WHERE image_id > ? AND (? = \'\' OR moderation_status = ?) ORDER BY image_id LIMIT 51',
-    ).bind(cursor, status, status).all<ManagedImage>();
+        `SELECT * FROM image_access WHERE ${conditions.join(' AND ')} ORDER BY image_id LIMIT 51`,
+    ).bind(...args).all<ManagedImage>();
     return results;
 }
 

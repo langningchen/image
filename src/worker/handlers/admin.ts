@@ -115,7 +115,12 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             if (cursor && !IMAGE_ID_PATTERN.test(cursor)) return json({ error: 'Invalid cursor' }, 400);
             const status = url.searchParams.get('status') ?? '';
             if (!['', 'pending', 'approved', 'flagged', 'error'].includes(status)) return json({ error: 'Invalid moderation status' }, 400);
-            const rows = await listImages(env, cursor, status);
+            const retention = url.searchParams.get('retention') ?? '';
+            const source = url.searchParams.get('source') ?? '';
+            const search = (url.searchParams.get('search') ?? '').trim();
+            if (!['', 'locked', 'unlocked', 'deleting', 'due', 'active', 'soon'].includes(retention)
+                || !['', 'safe', 'exempt', 'manual_approved', 'moderation_disabled'].includes(source) || search.length > 64) return json({ error: 'Invalid image filter' }, 400);
+            const rows = await listImages(env, cursor, status, retention, source, search);
             const images = rows.slice(0, 50);
             return json({ images, nextCursor: rows.length > 50 ? images[49].image_id : null });
         }

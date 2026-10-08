@@ -57,6 +57,7 @@ export default function Admin() {
   const [modelActivated, setModelActivated] = useState(false);
   const [fallback, setFallback] = useState<'allow' | 'deny'>('allow');
   const [imageFilter, setImageFilter] = useState('');
+  const [imageOptions, setImageOptions] = useState({ retention: '', source: '', search: '' });
   const [counts, setCounts] = useState<{ status: string; count: number }[]>([]);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [auditCursor, setAuditCursor] = useState<number | null>(null);
@@ -138,10 +139,10 @@ export default function Admin() {
     return result;
   }
 
-  async function load(token: string, next: string | null = null, filter = imageFilter) {
+  async function load(token: string, next: string | null = null, filter = imageFilter, options = imageOptions) {
     setBusy(true); setError('');
     try {
-      const query = new URLSearchParams({ status: filter });
+      const query = new URLSearchParams({ status: filter, ...options });
       if (next) query.set('cursor', next);
       const result = await api(`/images?${query}`, token);
       if (!next) {
@@ -276,6 +277,17 @@ export default function Admin() {
         </CardContent></Card>)}{!ips.length && <Typography color="text.secondary">No IP controls configured</Typography>}{ipCursor && <Button disabled={busy} onClick={moreIps}>Load more IPs</Button>}</Stack>
       </>}
       {tab === 'images' && <>
+        <Stack direction="row" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
+          <TextField select size="small" label="Retention" value={imageOptions.retention} disabled={busy} sx={{ minWidth: 180 }} onChange={event => { const options = { ...imageOptions, retention: event.target.value }; setImageOptions(options); void load(credential, null, imageFilter, options); }}>
+            {[['', 'All retention states'], ['locked', 'Locked'], ['unlocked', 'Unlocked'], ['deleting', 'Deleting'], ['due', 'Ready for cleanup'], ['soon', 'Expires within 24 hours'], ['active', 'Not expired']].map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}
+          </TextField>
+          <TextField select size="small" label="Approval source" value={imageOptions.source} disabled={busy} sx={{ minWidth: 180 }} onChange={event => { const options = { ...imageOptions, source: event.target.value }; setImageOptions(options); void load(credential, null, imageFilter, options); }}>
+            {[['', 'All sources'], ['safe', 'AI approved'], ['exempt', 'IP exempt'], ['manual_approved', 'Manually approved'], ['moderation_disabled', 'AI disabled']].map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}
+          </TextField>
+          <TextField size="small" label="Image ID / exact uploader IP" value={imageOptions.search} disabled={busy} onChange={event => setImageOptions({ ...imageOptions, search: event.target.value })} onKeyDown={event => { if (event.key === 'Enter') void load(credential); }} />
+          <Button disabled={busy} onClick={() => void load(credential)}>Search</Button>
+          <Button disabled={busy} onClick={() => { const options = { retention: '', source: '', search: '' }; setImageOptions(options); setImageFilter(''); void load(credential, null, '', options); }}>Reset filters</Button>
+        </Stack>
         <TextField select size="small" label="Moderation status" value={imageFilter} disabled={busy} onChange={event => { setImageFilter(event.target.value); void load(credential, null, event.target.value); }} sx={{ minWidth: 240, mb: 1.5 }}>
           <MenuItem value="">All images</MenuItem><MenuItem value="error">AI failed / needs review</MenuItem><MenuItem value="pending">Pending / legacy</MenuItem><MenuItem value="approved">Approved / exempt</MenuItem><MenuItem value="flagged">Flagged</MenuItem>
         </TextField>
