@@ -1,6 +1,6 @@
 import type { Env } from '../types.ts';
 import { claimDeletion, releaseDeletion, recoverDeletionClaims } from '../repositories/management.ts';
-import { RETENTION_MS } from '../constants.ts';
+import { retentionMs } from '../config.ts';
 import { listCurrentImages, deleteImageFromGithub } from '../repositories/github.ts';
 import { listAccessTimes, getAccessTime, initializeAccess, removeAccess, removeAccessBatch } from '../repositories/access.ts';
 const BATCH_SIZE = 100;
@@ -9,7 +9,7 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
     await recoverDeletionClaims(env, now);
     const currentImages = await listCurrentImages(env);
     const accessTimes = await listAccessTimes(env);
-    const cutoff = now - RETENTION_MS;
+    const cutoff = now - retentionMs(env);
 
     // Give images uploaded before this feature a full seven days from the first
     // cleanup run instead of deleting them without a known last-access time.

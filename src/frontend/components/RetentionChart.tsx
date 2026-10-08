@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Box, Card, CardContent, Typography } from '@mui/material';
 
-export interface RetentionStats { buckets: { bucket: string; count: number }[]; total: number; generatedAt: number }
+export interface RetentionStats { buckets: { bucket: string; count: number }[]; total: number; generatedAt: number; retentionMs: number }
 const segments = [
   { bucket: 'due', label: 'Ready for cleanup', color: '#d32f2f' },
   ...Array.from({ length: 7 }, (_, index) => ({ bucket: String(index + 1), label: index === 0 ? 'Within 1 day' : `${index + 1} days`, color: ['#ef6c00', '#f9a825', '#c0ca33', '#7cb342', '#00897b', '#00acc1', '#1976d2'][index] })),
@@ -11,7 +11,8 @@ const segments = [
 
 export default function RetentionChart({ stats }: { stats: RetentionStats }) {
   const [active, setActive] = useState<string | null>(null);
-  const rows = segments.map(segment => ({ ...segment, count: stats.buckets.find(row => row.bucket === segment.bucket)?.count ?? 0 }));
+  const extra = stats.buckets.filter(row => /^\d+$/.test(row.bucket) && Number(row.bucket) > 7).map(row => ({ bucket: row.bucket, label: `${row.bucket} days`, color: '#1976d2' }));
+  const rows = [...segments, ...extra].map(segment => ({ ...segment, count: stats.buckets.find(row => row.bucket === segment.bucket)?.count ?? 0 }));
   const circumference = 2 * Math.PI * 70;
   let offset = 0;
   const selected = rows.find(row => row.bucket === active);

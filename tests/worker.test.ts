@@ -819,3 +819,17 @@ test('all-digit image requests and admin pagination support access, traffic, loc
         assert.equal((await worker.fetch(adminRequest(`/images/${invalid}/review`, { method: 'POST', body: '{"action":"approve"}' }), env, ctx)).status, 404);
     }
 });
+
+test('environment retention and AI configuration affect public configuration and retention buckets', async () => {
+    const { env, ctx } = fixture();
+    const configured = { ...env, IMAGE_RETENTION_DAYS: '30', AI_MODERATION_ENABLED: 'false', AI_MODERATION_FALLBACK: 'deny' };
+    const response = await worker.fetch(new Request('https://image.test/api/config'), configured, ctx);
+    assert.deepEqual(await response.json(), { retentionDays: 30, moderationEnabled: false });
+    assert.equal(await getFallback(configured), 'deny');
+    await recordAccess(env, id, 1000);
+    const stats = await getRetentionDistribution(configured, 1000);
+    assert.equal(stats.retentionMs, 30 * 86400000);
+    assert.equal(stats.buckets[0].bucket, '30');
+    assert.equal(stats.buckets[0].count, 1);
+    await assert.rejects(() => getFallback({ ...env, AI_MODERATION_FALLBACK: 'invalid' }));
+});

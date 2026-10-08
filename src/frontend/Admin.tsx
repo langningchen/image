@@ -297,7 +297,7 @@ export default function Admin() {
                 <Link href={`/${image.image_id}?search`} target="_blank" rel="noopener" sx={{ fontSize: 12, alignSelf: 'center' }}>View</Link>
               </Stack>
               <Typography variant="caption" color="text.secondary">{new Date(image.last_accessed_at).toLocaleString('en-US')}</Typography>
-              <Typography variant="caption" sx={{ display: 'block' }}>{image.locked ? 'Retention paused' : image.deleting ? 'Cleanup in progress' : `Cleanup eligible in ${Math.max(0, Math.ceil((image.last_accessed_at + 7 * 86400000 - Date.now()) / 86400000))} days`}</Typography>
+              <Typography variant="caption" sx={{ display: 'block' }}>{image.locked ? 'Retention paused' : image.deleting ? 'Cleanup in progress' : `Cleanup eligible in ${Math.max(0, Math.ceil((image.last_accessed_at + (stats?.retention.retentionMs ?? 7 * 86400000) - Date.now()) / 86400000))} days`}</Typography>
               <Stack direction="row" sx={{ mt: .75, alignItems: 'center', justifyContent: 'space-between' }}>
                 <Chip size="small" label={image.deleting ? 'Deleting' : image.locked ? 'Locked' : 'Unlocked'} color={image.locked ? 'primary' : 'default'} />
                 <Button size="small" disabled={busy || !!image.deleting} onClick={() => toggle(image)}>{image.locked ? 'Unlock' : 'Lock'}</Button>

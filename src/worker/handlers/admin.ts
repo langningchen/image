@@ -61,6 +61,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
         if (url.pathname === '/api/admin/moderation-settings') {
             if (request.method === 'GET') return json({ fallback: await getFallback(env), counts: await moderationCounts(env) });
             if (request.method === 'PATCH') {
+                if (env.AI_MODERATION_FALLBACK !== undefined) return json({ error: 'Fallback is managed by AI_MODERATION_FALLBACK' }, 409);
                 let body: unknown;
                 try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
                 if (!body || typeof body !== 'object' || !('fallback' in body) || (body.fallback !== 'allow' && body.fallback !== 'deny')) {

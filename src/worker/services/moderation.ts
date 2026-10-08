@@ -1,4 +1,5 @@
 import type { Env } from '../types.ts';
+import { moderationTimeoutMs } from '../config.ts';
 
 export interface Verdict { approved: boolean; reason: string }
 export class AssessmentError extends Error {
@@ -59,6 +60,7 @@ export interface Assessment {
 
 export async function assessImage(env: Env, imageDataUrl: string): Promise<Assessment> {
     const started = Date.now();
+    const timeout = moderationTimeoutMs(env);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const result = await Promise.race([
         env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
@@ -75,7 +77,7 @@ Do not describe the image. Output the JSON verdict now.`,
             stream: false,
         }),
         new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new AssessmentError('timeout', 'Image assessment exceeded 20 seconds')), 20000);
+            timer = setTimeout(() => reject(new AssessmentError('timeout', `Image assessment exceeded ${timeout} ms`)), timeout);
         }),
     ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
     if (!result || typeof result !== 'object' || !('response' in result)) {

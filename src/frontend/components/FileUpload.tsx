@@ -37,6 +37,8 @@ interface FileUploadProps {
 }
 
 const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
+  const [retentionDays, setRetentionDays] = useState<number | null>(null);
+  React.useEffect(() => { void fetch('/api/config').then(response => response.json()).then(config => setRetentionDays(config.retentionDays)).catch(() => {}); }, []);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +196,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
           Click to select files, drag & drop, or paste images
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-          Uploaded images are automatically deleted after 7 days without being accessed.
+          {retentionDays === null ? 'Images expire after the configured inactivity period.' : `Uploaded images are automatically deleted after ${retentionDays} days without being accessed.`}
         </Typography>
 
         {uploading && (

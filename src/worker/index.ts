@@ -1,4 +1,5 @@
 import type { Env } from './types.ts';
+import { retentionMs, moderationEnabled } from './config.ts';
 import { trackResponse, pruneActivity } from './repositories/traffic.ts';
 import { handleAdmin } from './handlers/admin.ts';
 import { corsHeaders, IMAGE_ID_PATTERN } from './constants.ts';
@@ -20,6 +21,9 @@ export default {
             const metrics = { bytes: 0 };
             const response = await handleUpload(request, env, metrics);
             return trackResponse(request, response, env, ctx, metrics.bytes);
+        }
+        if (request.method === 'GET' && url.pathname === '/api/config') {
+            return Response.json({ retentionDays: retentionMs(env) / 86400000, moderationEnabled: moderationEnabled(env) }, { headers: { 'Cache-Control': 'no-store' } });
         }
         if (request.method === 'GET') {
             const response = await handleImageRequest(request, env, ctx);

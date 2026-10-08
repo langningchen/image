@@ -16,6 +16,10 @@ export function assessmentFailure(error: unknown, env: Env): FailureDetails {
 }
 
 export async function getFallback(env: Env): Promise<Fallback> {
+    if (env.AI_MODERATION_FALLBACK !== undefined) {
+        if (env.AI_MODERATION_FALLBACK !== 'allow' && env.AI_MODERATION_FALLBACK !== 'deny') throw new Error('Invalid AI_MODERATION_FALLBACK');
+        return env.AI_MODERATION_FALLBACK;
+    }
     const row = await env.DB.prepare('SELECT fallback FROM moderation_settings WHERE id = 1').first<{ fallback: Fallback }>();
     return row?.fallback === 'deny' ? 'deny' : 'allow';
 }

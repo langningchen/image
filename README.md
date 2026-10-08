@@ -160,3 +160,16 @@ The push uses `--force-with-lease`. If an upload changes the target branch while
 ## License
 
 This project is licensed under the terms of the GNU General Public License v3.0.
+
+### Environment configuration
+
+Set non-secret Worker variables in `wrangler.jsonc` under `vars` (or in the deployment configuration); use `.dev.vars` locally. Defaults preserve existing behavior:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `IMAGE_RETENTION_DAYS` | `7` | Positive inactivity period in days, up to 3650; fractional days supported. Applies to existing images too. |
+| `AI_MODERATION_ENABLED` | `true` | `false` skips upload AI assessment and records `moderation_disabled`; IP bans and consent still apply. |
+| `AI_MODERATION_TIMEOUT_MS` | `20000` | Positive assessment timeout, up to 300000 milliseconds. |
+| `AI_MODERATION_FALLBACK` | unset | `allow` or `deny`; when set, overrides the persisted admin setting and prevents changing it through the admin API. |
+
+The public `/api/config` endpoint exposes the retention period and AI enabled flag only. Cleanup eligibility, admin cards and retention statistics use the same configured period. The daily cron remains configured through Wrangler `triggers.crons`.

@@ -1,4 +1,5 @@
 import type { Env } from '../types.ts';
+import { moderationEnabled } from '../config.ts';
 import { IMAGE_ID_PATTERN, corsHeaders } from '../constants.ts';
 import { githubApiUrl, githubHeaders, type GithubContentResponse } from '../repositories/github.ts';
 import { moderateImage } from '../services/moderation.ts';
@@ -51,9 +52,9 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     const image = new TextDecoder().decode(buffer);
     const match = image.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
     if (!match || match[2].length % 4 !== 0) return failure('Invalid image data', 400);
-    let verdict = { approved: true, reason: 'exempt' };
+    let verdict = { approved: true, reason: control?.exempt ? 'exempt' : 'moderation_disabled' };
     let assessmentError: FailureDetails | null = null;
-    if (!control?.exempt) {
+    if (!control?.exempt && moderationEnabled(env)) {
         try { verdict = await moderateImage(env, image); } catch (error) {
             console.error('Image assessment failed:', error);
             assessmentError = assessmentFailure(error, env);

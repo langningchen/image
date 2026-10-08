@@ -1,4 +1,4 @@
-import { RETENTION_MS } from '../constants.ts';
+import { retentionMs } from '../config.ts';
 import type { Env } from '../types.ts';
 
 export interface ManagedImage {
@@ -57,8 +57,8 @@ export async function getRetentionDistribution(env: Env, now = Date.now()) {
         WHEN locked = 1 THEN 'locked'
         WHEN deleting = 1 THEN 'deleting'
         WHEN last_accessed_at + ? <= ? THEN 'due'
-        ELSE CAST(MIN(7, MAX(1, CAST((last_accessed_at + ? - ? + 86399999) / 86400000 AS INTEGER))) AS TEXT)
+        ELSE CAST(MAX(1, CAST((last_accessed_at + ? - ? + 86399999) / 86400000 AS INTEGER)) AS TEXT)
         END AS bucket, COUNT(*) AS count FROM image_access GROUP BY bucket`)
-        .bind(RETENTION_MS, now, RETENTION_MS, now).all<{ bucket: string; count: number }>();
-    return { buckets: results, total: results.reduce((sum, row) => sum + row.count, 0), generatedAt: now };
+        .bind(retentionMs(env), now, retentionMs(env), now).all<{ bucket: string; count: number }>();
+    return { buckets: results, total: results.reduce((sum, row) => sum + row.count, 0), generatedAt: now, retentionMs: retentionMs(env) };
 }
