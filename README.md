@@ -28,7 +28,7 @@ Configure a custom domain/route in `wrangler.jsonc`, or enable `workers_dev` bef
 
 ## Configuration
 
-Use Worker secrets for credentials and `wrangler.jsonc` → `vars` for other settings. For local development, put variables in a Git-ignored `.dev.vars`.
+Use Worker secrets for credentials and the Cloudflare dashboard or `wrangler.jsonc` → `vars` for other settings. Deployments preserve dashboard variables (`keep_vars: true`). For local development, put variables in a Git-ignored `.dev.vars`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
