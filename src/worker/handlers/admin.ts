@@ -1,3 +1,4 @@
+import { secretMatches } from '../auth.ts';
 import type { Env } from '../types.ts';
 import { normalizeIp, updateIpControl } from '../repositories/ip-controls.ts';
 import { getTrafficStats, listIpOverview } from '../repositories/traffic.ts';
@@ -15,14 +16,7 @@ function json(value: unknown, status = 200): Response {
 async function authorized(request: Request, secret: string): Promise<boolean> {
     const header = request.headers.get('Authorization');
     if (!header?.startsWith('Bearer ') || header.length > 1024) return false;
-    const supplied = header.slice(7);
-    const encoder = new TextEncoder();
-    const [a, b] = await Promise.all([supplied, secret].map(value => crypto.subtle.digest('SHA-256', encoder.encode(value))));
-    const left = new Uint8Array(a);
-    const right = new Uint8Array(b);
-    let difference = 0;
-    for (let i = 0; i < left.length; i++) difference |= left[i] ^ right[i];
-    return difference === 0;
+    return secretMatches(header.slice(7), secret);
 }
 
 export async function handleAdmin(request: Request, env: Env): Promise<Response> {

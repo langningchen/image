@@ -1,4 +1,5 @@
 import type { Env } from '../types.ts';
+import { secretMatches } from '../auth.ts';
 import { moderationEnabled } from '../config.ts';
 import { IMAGE_ID_PATTERN, corsHeaders } from '../constants.ts';
 import { githubApiUrl, githubHeaders, type GithubContentResponse } from '../repositories/github.ts';
@@ -27,6 +28,9 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     const failure = (message: string, status: number) => new Response(message, { status, headers: corsHeaders });
     if (request.headers.get(CONSENT_HEADER) !== TERMS_VERSION) {
         return failure('Please read and accept the current Terms of Service at /terms.html before uploading.', 428);
+    }
+    if (env.UPLOAD_PASSWORD && !(await secretMatches(request.headers.get('X-Upload-Password') ?? '', env.UPLOAD_PASSWORD))) {
+        return failure('Upload password required or incorrect', 401);
     }
     const ip = clientIp(request);
     let control;

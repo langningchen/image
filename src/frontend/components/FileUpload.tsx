@@ -5,6 +5,7 @@ import {
   Typography,
   LinearProgress,
   Alert,
+  TextField,
   styled
 } from '@mui/material';
 import { CloudUpload } from '@mui/icons-material';
@@ -37,8 +38,10 @@ interface FileUploadProps {
 }
 
 const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
+  const [uploadPassword, setUploadPassword] = useState('');
+  const [passwordRequired, setPasswordRequired] = useState(false);
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
-  React.useEffect(() => { void fetch('/api/config').then(response => response.json()).then(config => setRetentionDays(config.retentionDays)).catch(() => {}); }, []);
+  React.useEffect(() => { void fetch('/api/config').then(response => response.json()).then(config => { setRetentionDays(config.retentionDays); setPasswordRequired(config.uploadPasswordRequired); }).catch(() => {}); }, []);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +61,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
             method: 'POST',
             headers: {
               'Content-Type': 'text/plain',
+              ...(uploadPassword ? { 'X-Upload-Password': uploadPassword } : {}),
               [CONSENT_HEADER]: TERMS_VERSION,
             }
           });
@@ -76,7 +80,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       reader.onerror = () => reject(new Error('File read failed'));
       reader.readAsDataURL(file);
     });
-  }, []);
+  }, [uploadPassword]);
 
   const handleUpload = useCallback(async (files: FileList) => {
     if (files.length === 0) return;
@@ -172,6 +176,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
 
   return (
     <Box sx={{ mb: 4 }}>
+      {passwordRequired && <TextField type="password" label="Upload password" value={uploadPassword} onChange={event => setUploadPassword(event.target.value)} disabled={uploading} autoComplete="off" fullWidth sx={{ mb: 2 }} helperText="Enter the upload password provided by the site operator." />}
       <HiddenInput
         ref={fileInputRef}
         type="file"

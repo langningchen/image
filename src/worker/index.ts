@@ -23,7 +23,7 @@ export default {
             return trackResponse(request, response, env, ctx, metrics.bytes);
         }
         if (request.method === 'GET' && url.pathname === '/api/config') {
-            return Response.json({ retentionDays: retentionMs(env) / 86400000, moderationEnabled: moderationEnabled(env) }, { headers: { 'Cache-Control': 'no-store' } });
+            return Response.json({ retentionDays: retentionMs(env) / 86400000, moderationEnabled: moderationEnabled(env), uploadPasswordRequired: Boolean(env.UPLOAD_PASSWORD) }, { headers: { 'Cache-Control': 'no-store' } });
         }
         if (request.method === 'GET') {
             const response = await handleImageRequest(request, env, ctx);

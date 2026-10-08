@@ -824,7 +824,7 @@ test('environment retention and AI configuration affect public configuration and
     const { env, ctx } = fixture();
     const configured = { ...env, IMAGE_RETENTION_DAYS: '30', AI_MODERATION_ENABLED: 'false', AI_MODERATION_FALLBACK: 'deny' };
     const response = await worker.fetch(new Request('https://image.test/api/config'), configured, ctx);
-    assert.deepEqual(await response.json(), { retentionDays: 30, moderationEnabled: false });
+    assert.deepEqual(await response.json(), { retentionDays: 30, moderationEnabled: false, uploadPasswordRequired: false });
     assert.equal(await getFallback(configured), 'deny');
     await recordAccess(env, id, 1000);
     const stats = await getRetentionDistribution(configured, 1000);
@@ -847,4 +847,24 @@ test('admin image filters combine retention, approval source and search before p
     assert.equal((await request('source=invalid')).status, 400);
     assert.equal((await request('search=%27%20OR%201=1')).status, 200);
     assert.equal((await (await request('search=%27%20OR%201=1')).json()).images.length, 0);
+});
+
+test('optional upload password rejects missing/wrong credentials before AI or storage', async t => {
+    const { env, ctx } = fixture();
+    let aiCalls = 0;
+    let writes = 0;
+    env.AI.run = async () => { aiCalls++; return { response: JSON.stringify({ approved: true, reason: 'safe' }) }; };
+    t.mock.method(globalThis, 'fetch', async (url) => { writes++; return Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } }); });
+    const configured = { ...env, UPLOAD_PASSWORD: 'upload-secret', AI_MODERATION_ENABLED: 'false' };
+    const upload = (password: string) => worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION, 'X-Upload-Password': password }, body: 'data:image/jpeg;base64,aGVsbG8=' }), configured, ctx);
+    assert.equal((await upload('')).status, 401);
+    assert.equal((await upload('wrong')).status, 401);
+    assert.equal(aiCalls, 0);
+    assert.equal(writes, 0);
+    assert.equal((await upload('upload-secret')).status, 200);
+    assert.equal(aiCalls, 0);
+    assert.equal(writes, 1);
+    const config = await (await worker.fetch(new Request('https://image.test/api/config'), configured, ctx)).text();
+    assert.equal(JSON.parse(config).uploadPasswordRequired, true);
+    assert.ok(!config.includes('upload-secret'));
 });
