@@ -88,7 +88,7 @@ test('upload initializes D1, previews do not renew and conditional views do rene
 
 test('conditional requests return 404 when image was deleted', async t => {
     const { env, ctx } = fixture();
-    t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 404 }));
+    t.mock.method(globalThis, 'fetch', async url => new Response(null, { status: String(url).includes('/contents/') ? 404 : 200 }));
     assert.equal((await worker.fetch(new Request(`https://image.test/${id}`, { headers: { 'If-None-Match': `"${id}"` } }), env, ctx)).status, 404);
 });
 
@@ -882,4 +882,14 @@ test('image storage misconfiguration and upstream failures are not reported as m
     assert.equal(calls, 1);
     t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network unavailable'); });
     assert.equal((await worker.fetch(request, env, ctx)).status, 502);
+});
+
+test('GitHub private repository permission errors cannot masquerade as missing images', async t => {
+    const { env, ctx } = fixture();
+    const urls: string[] = [];
+    t.mock.method(globalThis, 'fetch', async url => { urls.push(String(url)); return new Response(null, { status: 404 }); });
+    const response = await worker.fetch(new Request(`https://image.test/${id}?search`), env, ctx);
+    assert.equal(response.status, 502);
+    assert.equal(urls.length, 4);
+    assert.equal(urls[3], 'https://api.github.com/repos/test/images');
 });

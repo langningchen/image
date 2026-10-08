@@ -201,7 +201,15 @@ export async function handleImageRequest(request: Request, env: Env, ctx: Execut
         }
 
         if (!githubResponse?.ok) {
-            if (githubResponse?.status === 404) return new Response('Image not found', { status: 404, headers: corsHeaders });
+            if (githubResponse?.status === 404) {
+                // Private repositories also return 404 when the token cannot access them.
+                // Confirm repository access before treating the file as absent.
+                const repository = await fetch(githubApiUrl(env, ''), { headers: githubHeaders(env) });
+                await repository.body?.cancel();
+                if (repository.ok) return new Response('Image not found', { status: 404, headers: corsHeaders });
+                console.error('Image repository access failed: check GITHUB_PAT repository access and Contents permission; status', repository.status);
+                return new Response('Image storage unavailable', { status: 502, headers: corsHeaders });
+            }
             console.error('Image storage request failed:', imageId, githubResponse?.status);
             await githubResponse?.body?.cancel();
             return new Response('Image storage unavailable', { status: 502, headers: corsHeaders });
