@@ -868,3 +868,18 @@ test('optional upload password rejects missing/wrong credentials before AI or st
     assert.equal(JSON.parse(config).uploadPasswordRequired, true);
     assert.ok(!config.includes('upload-secret'));
 });
+
+test('image storage misconfiguration and upstream failures are not reported as missing files', async t => {
+    const { env, ctx } = fixture();
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; return new Response('Unauthorized', { status: 401 }); });
+    const request = new Request(`https://image.test/${id}?search`);
+    const missing = await worker.fetch(request, { ...env, GITHUB_PAT: '' }, ctx);
+    assert.equal(missing.status, 503);
+    assert.equal(calls, 0);
+    const upstream = await worker.fetch(request, env, ctx);
+    assert.equal(upstream.status, 502);
+    assert.equal(calls, 1);
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network unavailable'); });
+    assert.equal((await worker.fetch(request, env, ctx)).status, 502);
+});

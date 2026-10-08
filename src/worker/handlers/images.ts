@@ -183,6 +183,10 @@ export async function handleImageRequest(request: Request, env: Env, ctx: Execut
         return new Response('Image not found', { status: 404, headers: corsHeaders });
     }
 
+    if (![env.GITHUB_OWNER, env.GITHUB_REPO, env.GITHUB_PAT].every(value => typeof value === 'string' && value.trim())) {
+        console.error('Image storage configuration missing: check GITHUB_OWNER, GITHUB_REPO and GITHUB_PAT');
+        return new Response('Image storage unavailable', { status: 503, headers: corsHeaders });
+    }
     try {
         let extension = 'jpeg';
         let githubResponse: Response | undefined;
@@ -197,7 +201,10 @@ export async function handleImageRequest(request: Request, env: Env, ctx: Execut
         }
 
         if (!githubResponse?.ok) {
-            return new Response('Image not found', { status: 404, headers: corsHeaders });
+            if (githubResponse?.status === 404) return new Response('Image not found', { status: 404, headers: corsHeaders });
+            console.error('Image storage request failed:', imageId, githubResponse?.status);
+            await githubResponse?.body?.cancel();
+            return new Response('Image storage unavailable', { status: 502, headers: corsHeaders });
         }
 
         const headers = imageResponseHeaders(imageId, extension);
@@ -216,7 +223,7 @@ export async function handleImageRequest(request: Request, env: Env, ctx: Execut
         }
         return new Response(githubResponse.body, { headers });
     } catch (error) {
-        console.error('Image fetch error:', imageId, error);
-        return new Response('Image not found', { status: 404, headers: corsHeaders });
+        console.error('Image fetch failed:', imageId);
+        return new Response('Image storage unavailable', { status: 502, headers: corsHeaders });
     }
 }
