@@ -31,7 +31,7 @@ function fixture(alphanumericIds = true) {
             all: async () => ({ results: sqlite.prepare(sql).all(...args) }),
         };
     }
-    const env = { DB: { prepare, batch: async (statements: any[]) => Promise.all(statements.map(s => s.run())) }, GithubOwner: 'test', GithubRepo: 'images', GithubPAT: 'test', ADMIN_PASSWORD: 'test-password', AI: { run: async () => ({ response: JSON.stringify({ approved: true, reason: 'safe' }) }) } };
+    const env = { DB: { prepare, batch: async (statements: any[]) => Promise.all(statements.map(s => s.run())) }, GITHUB_OWNER: 'test', GITHUB_REPO: 'images', GITHUB_PAT: 'test', ADMIN_PASSWORD: 'test-password', AI: { run: async () => ({ response: JSON.stringify({ approved: true, reason: 'safe' }) }) } };
     const pending: Promise<unknown>[] = [];
     const ctx = { waitUntil: (promise: Promise<unknown>) => pending.push(promise) };
     return { env, ctx, pending, sqlite };

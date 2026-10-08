@@ -8,7 +8,7 @@ export function assessmentFailure(error: unknown, env: Env): FailureDetails {
     const code = error instanceof AssessmentError ? error.code : 'provider_error';
     let message = error instanceof Error ? error.message : 'Unknown AI error';
     // Provider errors can include request data; do not persist credentials or image bytes.
-    for (const secret of [env.GithubPAT, env.ADMIN_PASSWORD, env.UPLOAD_PASSWORD]) {
+    for (const secret of [env.GITHUB_PAT, env.ADMIN_PASSWORD, env.UPLOAD_PASSWORD]) {
         if (secret) message = message.split(secret).join('[redacted]');
     }
     message = message.replace(/data:image\/[^\s"']+/g, '[image data]').slice(0, 500);

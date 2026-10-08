@@ -78,9 +78,9 @@ IP location previews use [Cloudflare request metadata](https://developers.cloudf
 3. Set the repository credentials and administrator password:
 
    ```sh
-   pnpm wrangler:remote secret put GithubPAT
-   pnpm wrangler:remote secret put GithubOwner
-   pnpm wrangler:remote secret put GithubRepo
+   pnpm wrangler:remote secret put GITHUB_PAT
+   pnpm wrangler:remote secret put GITHUB_OWNER
+   pnpm wrangler:remote secret put GITHUB_REPO
    pnpm wrangler:remote secret put ADMIN_PASSWORD
    ```
 
@@ -103,7 +103,7 @@ The daily Cron Trigger runs at 03:45 UTC. D1 Free currently includes 100,000 row
 
 ## Local development
 
-Create a Git-ignored `.dev.vars` with `GithubPAT`, `GithubOwner` and `GithubRepo` (one `NAME=value` per line). Local requests still access that GitHub repository, so use a separate development image repository.
+Create a Git-ignored `.dev.vars` with `GITHUB_PAT`, `GITHUB_OWNER` and `GITHUB_REPO` (one `NAME=value` per line). Local requests still access that GitHub repository, so use a separate development image repository.
 
 ```sh
 pnpm db:migrate:local

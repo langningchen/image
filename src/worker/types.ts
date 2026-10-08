@@ -1,7 +1,7 @@
 export interface Env {
-    GithubOwner: string;
-    GithubRepo: string;
-    GithubPAT: string;
+    GITHUB_OWNER: string;
+    GITHUB_REPO: string;
+    GITHUB_PAT: string;
     DB: D1Database;
     AI: Ai;
     ADMIN_PASSWORD: string;

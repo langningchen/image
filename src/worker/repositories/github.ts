@@ -19,7 +19,7 @@ interface GithubTreeResponse {
 
 export function githubHeaders(env: Env, accept = 'application/vnd.github+json'): HeadersInit {
     return {
-        'Authorization': `Bearer ${env.GithubPAT}`,
+        'Authorization': `Bearer ${env.GITHUB_PAT}`,
         'Accept': accept,
         'X-GitHub-Api-Version': GITHUB_API_VERSION,
         'User-Agent': 'langningchen-image',
@@ -28,7 +28,7 @@ export function githubHeaders(env: Env, accept = 'application/vnd.github+json'):
 
 export function githubApiUrl(env: Env, path: string): URL {
     return new URL(
-        `https://api.github.com/repos/${encodeURIComponent(env.GithubOwner)}/${encodeURIComponent(env.GithubRepo)}${path}`,
+        `https://api.github.com/repos/${encodeURIComponent(env.GITHUB_OWNER)}/${encodeURIComponent(env.GITHUB_REPO)}${path}`,
     );
 }
 
