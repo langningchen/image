@@ -1,47 +1,34 @@
+import { AdminButton, AdminBadge } from '../admin/ui';
 import { useState } from 'react';
-import { Box, Card, CardContent, Typography } from '@mui/material';
+import type { Filters } from '../admin/model';
+import { emptyFilters } from '../admin/model';
 
 export interface RetentionStats { buckets: { bucket: string; count: number }[]; total: number; generatedAt: number; retentionMs: number }
 const segments = [
   { bucket: 'due', label: 'Ready for cleanup', color: '#d32f2f' },
-  ...Array.from({ length: 7 }, (_, index) => ({ bucket: String(index + 1), label: index === 0 ? 'Within 1 day' : `${index + 1} days`, color: ['#ef6c00', '#f9a825', '#c0ca33', '#7cb342', '#00897b', '#00acc1', '#1976d2'][index] })),
+  ...Array.from({ length: 6 }, (_, index) => ({ bucket: String(index + 1), label: index === 0 ? 'Within 1 day' : `${index + 1} days`, color: ['#ef6c00', '#f9a825', '#c0ca33', '#7cb342', '#00897b', '#00acc1'][index] })),
+  { bucket: '7-14', label: '7–14 days', color: '#1976d2' },
+  { bucket: '15-21', label: '15–21 days', color: '#3949ab' },
+  { bucket: '22-30', label: '22–30 days', color: '#5e35b1' },
+  { bucket: 'over30', label: 'More than 30 days', color: '#8e24aa' },
   { bucket: 'locked', label: 'Locked', color: '#7b1fa2' },
   { bucket: 'deleting', label: 'Deleting', color: '#757575' },
 ];
-
-export default function RetentionChart({ stats }: { stats: RetentionStats }) {
+export default function RetentionChart({ stats, onExplore }: { stats: RetentionStats; onExplore: (filters: Filters) => void }) {
   const [active, setActive] = useState<string | null>(null);
-  const extra = stats.buckets.filter(row => /^\d+$/.test(row.bucket) && Number(row.bucket) > 7).map(row => ({ bucket: row.bucket, label: `${row.bucket} days`, color: '#1976d2' }));
-  const rows = [...segments, ...extra].map(segment => ({ ...segment, count: stats.buckets.find(row => row.bucket === segment.bucket)?.count ?? 0 }));
-  const circumference = 2 * Math.PI * 70;
-  let offset = 0;
+  const rows = segments.map(segment => ({ ...segment, count: stats.buckets.find(row => row.bucket === segment.bucket)?.count ?? 0 }));
   const selected = rows.find(row => row.bucket === active);
-  return <Card variant="outlined" sx={{ minWidth: 0 }}><CardContent>
-    <Typography variant="subtitle2" sx={{ mb: 1 }}>Time until image cleanup</Typography>
-    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', gap: 1.5 }}>
-      <svg width="190" height="190" viewBox="0 0 190 190" role="img" aria-label="Image retention distribution" style={{ flexShrink: 0 }}>
-        <circle cx="95" cy="95" r="70" stroke="#eee" strokeWidth="28" fill="none" />
-        {rows.filter(row => row.count > 0).map(row => {
-          const length = row.count / stats.total * circumference;
-          const start = offset; offset += length;
-          return <circle key={row.bucket} cx="95" cy="95" r="70" fill="none" stroke={row.color} strokeWidth="28"
-            strokeDasharray={`${length} ${circumference - length}`} strokeDashoffset={-start} transform="rotate(-90 95 95)"
-            opacity={active && active !== row.bucket ? .3 : 1} onMouseEnter={() => setActive(row.bucket)} onMouseLeave={() => setActive(null)}>
-            <title>{row.label}: {row.count} ({(row.count / stats.total * 100).toFixed(1)}%)</title>
-          </circle>;
-        })}
-        <text x="95" y="95" textAnchor="middle" fontSize="25" fontWeight="600" fill="#333">{(selected?.count ?? stats.total).toLocaleString('en-US')}</text>
-        <text x="95" y="116" textAnchor="middle" fontSize="11" fill="#666">{selected?.label ?? 'Tracked images'}</text>
-      </svg>
-      <Box sx={{ flex: '1 1 160px', minWidth: 0 }}>
-        {rows.map(row => <Box component="button" type="button" key={row.bucket} onMouseEnter={() => setActive(row.bucket)} onMouseLeave={() => setActive(null)} onFocus={() => setActive(row.bucket)} onBlur={() => setActive(null)}
-          sx={{ border: 0, bgcolor: active === row.bucket ? 'grey.100' : 'transparent', display: 'flex', alignItems: 'center', width: '100%', p: .4, gap: .75, borderRadius: 1, cursor: 'pointer', textAlign: 'left' }}>
-          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: row.color, flexShrink: 0 }} />
-          <Typography variant="caption" sx={{ flex: 1 }}>{row.label}</Typography>
-          <Typography variant="caption">{row.count} · {stats.total ? Math.round(row.count / stats.total * 100) : 0}%</Typography>
-        </Box>)}
-      </Box>
-    </Box>
-    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>Based on last access. Eligible images are removed by the daily cleanup.</Typography>
-  </CardContent></Card>;
+  const circumference = 2 * Math.PI * 74;
+  let offset = 0;
+  function explore(bucket: string) {
+    onExplore(bucket === 'locked' || bucket === 'deleting' ? { ...emptyFilters, retention: bucket } : { ...emptyFilters, retention: 'unlocked', expiry: bucket });
+  }
+  return <section className="panel retention-panel"><div className="panel-heading"><div><h2>Retention outlook</h2><p>When images become eligible for cleanup</p></div><AdminBadge className="badge neutral">All images</AdminBadge></div><div className="retention-content">
+    <div className="donut-wrap"><svg width="220" height="220" viewBox="0 0 220 220" role="img" aria-label="Image cleanup distribution"><circle cx="110" cy="110" r="74" stroke="#eee" strokeWidth="22" fill="none" />{rows.filter(row => row.count).map(row => {
+      const length = row.count / stats.total * circumference;
+      const start = offset; offset += length;
+      return <circle key={row.bucket} cx="110" cy="110" r="74" fill="none" stroke={row.color} strokeWidth={active === row.bucket ? 27 : 22} strokeDasharray={`${length} ${circumference - length}`} strokeDashoffset={-start} transform="rotate(-90 110 110)" opacity={active && active !== row.bucket ? .25 : 1} onMouseEnter={() => setActive(row.bucket)} onMouseLeave={() => setActive(null)}><title>{row.label}: {row.count}</title></circle>;
+    })}<text x="110" y="110" textAnchor="middle" className="donut-value">{(selected?.count ?? stats.total).toLocaleString()}</text><text x="110" y="133" textAnchor="middle" className="donut-label">{selected?.label ?? 'tracked images'}</text></svg><p className="muted">Select a group to explore images</p></div>
+    <div className="retention-legend">{rows.map(row => <AdminButton key={row.bucket} disabled={!row.count} onClick={() => explore(row.bucket)} onMouseEnter={() => setActive(row.bucket)} onMouseLeave={() => setActive(null)} onFocus={() => setActive(row.bucket)} onBlur={() => setActive(null)}><span className="legend-dot" style={{ background: row.color }} /><span>{row.label}</span><strong>{row.count.toLocaleString()}</strong><span className="legend-percent">{stats.total ? Math.round(row.count / stats.total * 100) : 0}%</span></AdminButton>)}</div>
+  </div><div className="panel-note">Based on last access. Actual deletion runs during daily cleanup.</div></section>;
 }

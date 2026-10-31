@@ -6,7 +6,7 @@ import worker from '../src/worker/index.ts';
 import { recordAccess, initializeAccess, getAccessTime, listAccessTimes } from '../src/worker/repositories/access.ts';
 import { cleanupInactiveImages } from '../src/worker/services/cleanup.ts';
 import { recordViolation, getIpControl, updateIpControl, normalizeIp, VIOLATION_WINDOW_MS } from '../src/worker/repositories/ip-controls.ts';
-import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution } from '../src/worker/repositories/management.ts';
+import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution, listImages } from '../src/worker/repositories/management.ts';
 import { getTrafficStats, recordTraffic, pruneActivity, listIpOverview, requestLocation } from '../src/worker/repositories/traffic.ts';
 import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
@@ -397,7 +397,7 @@ test('retention distribution handles expiry boundaries and counts all images bey
         { key: 'a', access: now - RETENTION_MS, bucket: 'due' },
         { key: 'b', access: now - RETENTION_MS + 1, bucket: '1' },
         { key: 'c', access: now - RETENTION_MS + day + 1, bucket: '2' },
-        { key: 'd', access: now, bucket: '7' },
+        { key: 'd', access: now, bucket: '7-14' },
     ];
     for (const row of cases) await recordAccess(env, row.key.repeat(32), row.access);
     await recordAccess(env, 'e'.repeat(32), 1);
@@ -829,7 +829,7 @@ test('environment retention and AI configuration affect public configuration and
     await recordAccess(env, id, 1000);
     const stats = await getRetentionDistribution(configured, 1000);
     assert.equal(stats.retentionMs, 30 * 86400000);
-    assert.equal(stats.buckets[0].bucket, '30');
+    assert.equal(stats.buckets[0].bucket, '22-30');
     assert.equal(stats.buckets[0].count, 1);
     await assert.rejects(() => getFallback({ ...env, AI_MODERATION_FALLBACK: 'invalid' }));
 });
@@ -847,6 +847,51 @@ test('admin image filters combine retention, approval source and search before p
     assert.equal((await request('source=invalid')).status, 400);
     assert.equal((await request('search=%27%20OR%201=1')).status, 200);
     assert.equal((await (await request('search=%27%20OR%201=1')).json()).images.length, 0);
+    assert.deepEqual((await (await request('status=approved&source=safe&locked=0&deleting=0&minDays=7&maxDays=7')).json()).images.map((row: any) => row.image_id), [id]);
+    assert.deepEqual((await (await request('minDays=0&maxDays=0')).json()).images.map((row: any) => row.image_id), [second]);
+    for (const query of ['minDays=-1', 'maxDays=1.5', 'minDays=8&maxDays=7', 'minDays=1000001', 'locked=2', 'deleting=true', 'maxDays=Infinity']) {
+        assert.equal((await request(query)).status, 400, query);
+    }
+});
+
+test('remaining day filters use rounded days and combine with fields before pagination', async t => {
+    const { env, sqlite } = fixture();
+    const now = 100 * 86400000;
+    const day = 86400000;
+    t.mock.method(Date, 'now', () => now);
+    const dueAt = now - RETENTION_MS;
+    for (const [key, offset] of [['a', 0], ['b', 1], ['c', day], ['d', day + 1]] as const) {
+        await recordAccess(env, key.repeat(32), dueAt + offset);
+    }
+    assert.deepEqual((await listImages(env, '', '', '', '', '', { minDays: 1, maxDays: 1 })).map(row => row.image_id), ['b'.repeat(32), 'c'.repeat(32)]);
+    assert.deepEqual((await listImages(env, '', '', '', '', '', { minDays: 2 })).map(row => row.image_id), ['d'.repeat(32)]);
+    await setLocked(env, 'b'.repeat(32), true);
+    sqlite.prepare('UPDATE image_access SET deleting = 1 WHERE image_id = ?').run('c'.repeat(32));
+    assert.equal((await listImages(env, '', '', '', '', '', { maxDays: 1 })).length, 1);
+    assert.deepEqual((await listImages(env, '', '', '', '', '', { locked: 1, deleting: 0 })).map(row => row.image_id), ['b'.repeat(32)]);
+    for (let index = 0; index < 60; index++) {
+        await recordAccess(env, `z${String(index).padStart(31, '0')}`, dueAt + 2 * day);
+    }
+    const first = await listImages(env, '', '', '', '', '', { minDays: 2, maxDays: 2, locked: 0 });
+    assert.equal(first.length, 51);
+    const next = await listImages(env, first[49].image_id, '', '', '', '', { minDays: 2, maxDays: 2, locked: 0 });
+    assert.equal(next.length, 11);
+});
+
+test('retention aggregates day groups at exact boundaries without losing counts', async () => {
+    const { env } = fixture();
+    const now = 100 * 86400000;
+    const day = 86400000;
+    const configured = { ...env, IMAGE_RETENTION_DAYS: '90' };
+    const remaining = [1, 6 * day, 6 * day + 1, 14 * day, 14 * day + 1, 21 * day, 21 * day + 1, 30 * day, 30 * day + 1, 90 * day];
+    for (const [index, milliseconds] of remaining.entries()) {
+        await recordAccess(env, String(index).repeat(32), now - 90 * day + milliseconds);
+    }
+    const stats = await getRetentionDistribution(configured, now);
+    assert.equal(stats.total, 10);
+    assert.deepEqual(Object.fromEntries(stats.buckets.map(row => [row.bucket, row.count])), {
+        '1': 1, '6': 1, '7-14': 2, '15-21': 2, '22-30': 2, over30: 2,
+    });
 });
 
 test('optional upload password rejects missing/wrong credentials before AI or storage', async t => {

@@ -16,7 +16,14 @@ export interface ManagedImage {
     moderation_response: string | null;
 }
 
-export async function listImages(env: Env, cursor: string, status = '', retention = '', source = '', search = ''): Promise<ManagedImage[]> {
+export interface ImageFieldFilters {
+    minDays?: number;
+    maxDays?: number;
+    locked?: number;
+    deleting?: number;
+}
+
+export async function listImages(env: Env, cursor: string, status = '', retention = '', source = '', search = '', fields: ImageFieldFilters = {}): Promise<ManagedImage[]> {
     const conditions = ['image_id > ?', "(? = '' OR moderation_status = ?)"];
     const args: (string | number)[] = [cursor, status, status];
     const cutoff = Date.now() - retentionMs(env);
@@ -28,6 +35,19 @@ export async function listImages(env: Env, cursor: string, status = '', retentio
     if (retention === 'soon') { conditions.push('locked = 0 AND deleting = 0 AND last_accessed_at > ? AND last_accessed_at <= ?'); args.push(cutoff, cutoff + 86400000); }
     if (source) { conditions.push('moderation_reason = ?'); args.push(source); }
     if (search) { conditions.push('(instr(image_id, ?) > 0 OR uploader_ip = ?)'); args.push(search, search); }
+    for (const field of ['locked', 'deleting'] as const) {
+        if (fields[field] !== undefined) { conditions.push(`${field} = ?`); args.push(fields[field]); }
+    }
+    // Match the displayed rounded-up days: 0 includes all images already due.
+    if (fields.minDays !== undefined || fields.maxDays !== undefined) {
+        conditions.push('locked = 0 AND deleting = 0');
+        if (fields.minDays !== undefined && fields.minDays > 0) {
+            conditions.push('last_accessed_at > ?'); args.push(cutoff + (fields.minDays - 1) * 86400000);
+        }
+        if (fields.maxDays !== undefined) {
+            conditions.push('last_accessed_at <= ?'); args.push(cutoff + fields.maxDays * 86400000);
+        }
+    }
     const { results } = await env.DB.prepare(
         `SELECT * FROM image_access WHERE ${conditions.join(' AND ')} ORDER BY image_id LIMIT 51`,
     ).bind(...args).all<ManagedImage>();
@@ -68,8 +88,13 @@ export async function getRetentionDistribution(env: Env, now = Date.now()) {
         WHEN locked = 1 THEN 'locked'
         WHEN deleting = 1 THEN 'deleting'
         WHEN last_accessed_at + ? <= ? THEN 'due'
+        WHEN last_accessed_at + ? > ? + 30 * 86400000 THEN 'over30'
+        WHEN last_accessed_at + ? > ? + 21 * 86400000 THEN '22-30'
+        WHEN last_accessed_at + ? > ? + 14 * 86400000 THEN '15-21'
+        WHEN last_accessed_at + ? > ? + 6 * 86400000 THEN '7-14'
         ELSE CAST(MAX(1, CAST((last_accessed_at + ? - ? + 86399999) / 86400000 AS INTEGER)) AS TEXT)
         END AS bucket, COUNT(*) AS count FROM image_access GROUP BY bucket`)
-        .bind(retentionMs(env), now, retentionMs(env), now).all<{ bucket: string; count: number }>();
+        .bind(retentionMs(env), now, retentionMs(env), now, retentionMs(env), now, retentionMs(env), now,
+            retentionMs(env), now, retentionMs(env), now).all<{ bucket: string; count: number }>();
     return { buckets: results, total: results.reduce((sum, row) => sum + row.count, 0), generatedAt: now, retentionMs: retentionMs(env) };
 }

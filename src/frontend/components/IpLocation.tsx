@@ -1,4 +1,3 @@
-import { Typography } from '@mui/material';
 
 export interface IpDetails {
   ip: string;
@@ -19,7 +18,7 @@ export default function IpLocation({ ip }: { ip: IpDetails }) {
   if (country && /^[A-Z]{2}$/.test(country)) country = countryNames.of(country) ?? country;
   const place = [...new Set([ip.city, ip.region, country].filter(Boolean))].join(', ');
   const network = [ip.asn === null ? null : `AS${ip.asn}`, ip.organization].filter(Boolean).join(' · ');
-  return <Typography variant="caption" color="text.secondary" title={[place, network].filter(Boolean).join(' · ')} sx={{ display: 'block', overflowWrap: 'anywhere' }}>
+  return <span className="ip-location" title={[place, network].filter(Boolean).join(' · ')}>
     {place || 'Location unavailable'}{network ? ` · ${network}` : ''}
-  </Typography>;
+  </span>;
 }

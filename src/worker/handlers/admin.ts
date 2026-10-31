@@ -3,7 +3,7 @@ import type { Env } from '../types.ts';
 import { normalizeIp, updateIpControl } from '../repositories/ip-controls.ts';
 import { getTrafficStats, listIpOverview } from '../repositories/traffic.ts';
 import { IMAGE_ID_PATTERN } from '../constants.ts';
-import { listImages, setLocked, getRetentionDistribution } from '../repositories/management.ts';
+import { listImages, setLocked, getRetentionDistribution, type ImageFieldFilters } from '../repositories/management.ts';
 import { getFallback, setFallback, listAudit, moderationCounts, approveImage, claimRemoval, finishRemoval } from '../repositories/assessment.ts';
 import { deleteImageFromGithub } from '../repositories/github.ts';
 import { assessImage } from '../services/moderation.ts';
@@ -112,9 +112,22 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             const retention = url.searchParams.get('retention') ?? '';
             const source = url.searchParams.get('source') ?? '';
             const search = (url.searchParams.get('search') ?? '').trim();
+            const fields: ImageFieldFilters = {};
+            for (const field of ['minDays', 'maxDays', 'locked', 'deleting'] as const) {
+                const value = url.searchParams.get(field);
+                if (value === null || value === '') continue;
+                const number = Number(value);
+                if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number > (field === 'locked' || field === 'deleting' ? 1 : 1000000)) {
+                    return json({ error: 'Invalid image filter' }, 400);
+                }
+                fields[field] = number;
+            }
+            if (fields.minDays !== undefined && fields.maxDays !== undefined && fields.minDays > fields.maxDays) {
+                return json({ error: 'Minimum days must not exceed maximum days' }, 400);
+            }
             if (!['', 'locked', 'unlocked', 'deleting', 'due', 'active', 'soon'].includes(retention)
                 || !['', 'safe', 'exempt', 'manual_approved', 'moderation_disabled'].includes(source) || search.length > 64) return json({ error: 'Invalid image filter' }, 400);
-            const rows = await listImages(env, cursor, status, retention, source, search);
+            const rows = await listImages(env, cursor, status, retention, source, search, fields);
             const images = rows.slice(0, 50);
             return json({ images, nextCursor: rows.length > 50 ? images[49].image_id : null });
         }
