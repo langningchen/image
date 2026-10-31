@@ -33,3 +33,24 @@ test('range validation accepts a zero boundary and rejects empty, reversed and f
     assert.notEqual(filterError({ ...emptyFilters, expiry: 'custom', ...range }), '');
   }
 });
+
+test('every retention chart segment opens a valid filter with a renderable label', async () => {
+  const { retentionBucketFilters } = await import('../src/frontend/admin/model.ts');
+  for (const bucket of ['due', '1', '2', '3', '4', '5', '6', '7-14', '15-21', '22-30', 'over30', 'locked', 'deleting']) {
+    const filters = retentionBucketFilters(bucket);
+    assert.equal(filterError(filters), '', bucket);
+    assert.ok(filterTags(filters).length > 0, bucket);
+    if (/^[2-6]$/.test(bucket)) {
+      assert.equal(filters.expiry, 'custom');
+      const query = new URLSearchParams(imageQuery(filters));
+      assert.equal(query.get('minDays'), bucket);
+      assert.equal(query.get('maxDays'), bucket);
+    }
+  }
+});
+
+test('unexpected filter values cannot crash label rendering and fail validation', () => {
+  const filters = { ...emptyFilters, expiry: 'unexpected' };
+  assert.notEqual(filterError(filters), '');
+  assert.doesNotThrow(() => filterTags(filters));
+});

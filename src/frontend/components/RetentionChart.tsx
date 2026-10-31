@@ -1,7 +1,7 @@
 import { AdminButton, AdminBadge } from '../admin/ui';
 import { useState } from 'react';
 import type { Filters } from '../admin/model';
-import { emptyFilters } from '../admin/model';
+import { retentionBucketFilters } from '../admin/model';
 
 export interface RetentionStats { buckets: { bucket: string; count: number }[]; total: number; generatedAt: number; retentionMs: number }
 const segments = [
@@ -21,7 +21,7 @@ export default function RetentionChart({ stats, onExplore }: { stats: RetentionS
   const circumference = 2 * Math.PI * 74;
   let offset = 0;
   function explore(bucket: string) {
-    onExplore(bucket === 'locked' || bucket === 'deleting' ? { ...emptyFilters, retention: bucket } : { ...emptyFilters, retention: 'unlocked', expiry: bucket });
+    onExplore(retentionBucketFilters(bucket));
   }
   return <section className="panel retention-panel"><div className="panel-heading"><div><h2>Retention outlook</h2><p>When images become eligible for cleanup</p></div><AdminBadge className="badge neutral">All images</AdminBadge></div><div className="retention-content">
     <div className="donut-wrap"><svg width="220" height="220" viewBox="0 0 220 220" role="img" aria-label="Image cleanup distribution"><circle cx="110" cy="110" r="74" stroke="#eee" strokeWidth="22" fill="none" />{rows.filter(row => row.count).map(row => {

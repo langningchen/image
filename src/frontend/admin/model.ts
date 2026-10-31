@@ -32,8 +32,14 @@ export const statuses = [['', 'Any review status'], ['error', 'Needs review'], [
 export const sources = [['', 'Any approval source'], ['safe', 'AI approved'], ['exempt', 'IP exempt'], ['manual_approved', 'Manually approved'], ['moderation_disabled', 'AI disabled']];
 export const lifecycles = [['', 'All images'], ['unlocked', 'Scheduled for cleanup'], ['locked', 'Locked / keep indefinitely'], ['deleting', 'Deletion in progress']];
 export const expiries = [['', 'Any remaining time'], ['due', 'Already due'], ['1', 'Within 1 day'], ['2-3', '2–3 days'], ['4-6', '4–6 days'], ['7-14', '7–14 days'], ['15-21', '15–21 days'], ['22-30', '22–30 days'], ['over30', 'More than 30 days'], ['custom', 'Custom day range']];
+export function retentionBucketFilters(bucket: string): Filters {
+  if (bucket === 'locked' || bucket === 'deleting') return { ...emptyFilters, retention: bucket };
+  if (/^[2-6]$/.test(bucket)) return { ...emptyFilters, retention: 'unlocked', expiry: 'custom', minDays: bucket, maxDays: bucket };
+  return { ...emptyFilters, retention: 'unlocked', expiry: bucket };
+}
 export function filterError(filters: Filters): string {
   if (filters.search.trim().length > 64) return 'Search must be 64 characters or fewer.';
+  if (!expiries.some(([value]) => value === filters.expiry)) return 'Choose a valid cleanup time.';
   if (filters.expiry !== 'custom') return '';
   const { minDays, maxDays } = filters;
   if (!minDays && !maxDays) return 'Enter at least one boundary for your day range.';
@@ -63,8 +69,8 @@ export function filterTags(filters: Filters): { field: keyof Filters; label: str
   const tags: { field: keyof Filters; label: string }[] = [];
   if (filters.search) tags.push({ field: 'search', label: `Search: ${filters.search}` });
   if (filters.status) tags.push({ field: 'status', label: statuses.find(([value]) => value === filters.status)?.[1] ?? filters.status });
-  if (filters.retention && !(filters.retention === 'unlocked' && filters.expiry)) tags.push({ field: 'retention', label: lifecycles.find(([value]) => value === filters.retention)![1] });
-  if (filters.expiry) tags.push({ field: 'expiry', label: filters.expiry === 'custom' ? `${filters.minDays || '0'}–${filters.maxDays || '∞'} days` : expiries.find(([value]) => value === filters.expiry)![1] });
+  if (filters.retention && !(filters.retention === 'unlocked' && filters.expiry)) tags.push({ field: 'retention', label: lifecycles.find(([value]) => value === filters.retention)?.[1] ?? filters.retention });
+  if (filters.expiry) tags.push({ field: 'expiry', label: filters.expiry === 'custom' ? `${filters.minDays || '0'}–${filters.maxDays || '∞'} days` : expiries.find(([value]) => value === filters.expiry)?.[1] ?? filters.expiry });
   if (filters.source) tags.push({ field: 'source', label: sources.find(([value]) => value === filters.source)?.[1] ?? filters.source });
   return tags;
 }
