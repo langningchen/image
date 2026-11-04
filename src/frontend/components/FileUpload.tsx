@@ -12,6 +12,7 @@ import { CloudUpload } from '@mui/icons-material';
 import { prepareImage } from '../prepareImage.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
 import { IMAGE_ID_PATTERN } from '../../worker/constants.ts';
+import { DEFAULT_UPLOAD_LIMITS, MEBIBYTE, type UploadLimits } from '../../uploadLimits.ts';
 
 const UploadBox = styled(Paper)(({ theme }) => ({
   border: `2px dashed ${theme.palette.divider}`,
@@ -37,11 +38,29 @@ interface FileUploadProps {
   onImageUploaded: (imageId: string) => void;
 }
 
+function isUploadLimit(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
+}
+
+function uploadSizeLabel(bytes: number): string {
+  const mebibytes = bytes / MEBIBYTE;
+  const decimals = mebibytes < 0.1 ? 6 : 1;
+  return `${Number(mebibytes.toFixed(decimals))} MiB`;
+}
+
 const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
   const [uploadPassword, setUploadPassword] = useState('');
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
-  React.useEffect(() => { void fetch('/api/config').then(response => response.json()).then(config => { setRetentionDays(config.retentionDays); setPasswordRequired(config.uploadPasswordRequired); }).catch(() => {}); }, []);
+  const [uploadLimits, setUploadLimits] = useState<UploadLimits>({ ...DEFAULT_UPLOAD_LIMITS });
+  React.useEffect(() => { void fetch('/api/config').then(response => response.json()).then(config => {
+    setRetentionDays(config.retentionDays);
+    setPasswordRequired(config.uploadPasswordRequired);
+    setUploadLimits({
+      maxImageDimension: isUploadLimit(config.maxImageDimension) ? config.maxImageDimension : DEFAULT_UPLOAD_LIMITS.maxImageDimension,
+      maxUploadBytes: isUploadLimit(config.maxUploadBytes) ? config.maxUploadBytes : DEFAULT_UPLOAD_LIMITS.maxUploadBytes,
+    });
+  }).catch(() => {}); }, []);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +73,13 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       const reader = new FileReader();
       reader.onload = async () => {
         try {
-          const imageData = await prepareImage(reader.result as string, file.size);
+          const imageData = await prepareImage(reader.result as string, uploadLimits.maxImageDimension);
+          if (uploadLimits.maxUploadBytes !== null) {
+            const encodedBytes = new TextEncoder().encode(imageData).byteLength;
+            if (encodedBytes > uploadLimits.maxUploadBytes) {
+              throw new Error(`Image exceeds the ${uploadSizeLabel(uploadLimits.maxUploadBytes)} upload limit.`);
+            }
+          }
 
           const response = await fetch('/upload', {
             body: imageData,
@@ -80,7 +105,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       reader.onerror = () => reject(new Error('File read failed'));
       reader.readAsDataURL(file);
     });
-  }, [uploadPassword]);
+  }, [uploadPassword, uploadLimits.maxImageDimension, uploadLimits.maxUploadBytes]);
 
   const handleUpload = useCallback(async (files: FileList) => {
     if (files.length === 0) return;
@@ -199,6 +224,11 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
         </Typography>
         <Typography variant="body2" color="text.secondary">
           Click to select files, drag & drop, or paste images
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          {uploadLimits.maxImageDimension === null ? 'Original image dimensions are preserved.' : `Images are resized to a maximum ${uploadLimits.maxImageDimension} px edge.`}
+          {' '}
+          {uploadLimits.maxUploadBytes === null ? 'No application upload size limit is set.' : `Maximum upload size: ${uploadSizeLabel(uploadLimits.maxUploadBytes)}.`}
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
           {retentionDays === null ? 'Images expire after the configured inactivity period.' : `Uploaded images are automatically deleted after ${retentionDays} days without being accessed.`}

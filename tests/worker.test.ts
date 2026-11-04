@@ -12,6 +12,8 @@ import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
 import { setFallback, getFallback } from '../src/worker/repositories/assessment.ts';
 import { parseVerdict, AssessmentError, moderateImage } from '../src/worker/services/moderation.ts';
+import { getUploadLimits, setUploadLimits } from '../src/worker/repositories/upload-settings.ts';
+import { DEFAULT_UPLOAD_LIMITS } from '../src/uploadLimits.ts';
 
 const id = 'a1'.repeat(16);
 const second = 'b2'.repeat(16);
@@ -23,6 +25,7 @@ function fixture(alphanumericIds = true) {
     sqlite.exec(readFileSync(new URL('../migrations/0004_ip_geolocation.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0005_moderation_fallback.sql', import.meta.url), 'utf8'));
     if (alphanumericIds) sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/0007_upload_limits.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
@@ -556,6 +559,52 @@ test('fallback settings require authentication, validate inputs and denied attem
     await Promise.all(pending);
 });
 
+test('upload limits can be configured independently and are exposed to uploaders', async () => {
+    const { env, ctx } = fixture();
+    const request = (init: RequestInit = {}, password = 'test-password') => worker.fetch(adminRequest('/upload-settings', init, password), env, ctx);
+    assert.deepEqual(await (await request()).json(), { ...DEFAULT_UPLOAD_LIMITS });
+    assert.equal((await request({}, 'wrong')).status, 401);
+    assert.equal((await request({ method: 'PATCH', headers: { Origin: 'https://other.test' }, body: '{"maxImageDimension":null,"maxUploadBytes":null}' })).status, 403);
+    for (const body of [
+        '{}',
+        'invalid',
+        '{"maxImageDimension":0,"maxUploadBytes":null}',
+        '{"maxImageDimension":100,"maxUploadBytes":-1}',
+        '{"maxImageDimension":100.5,"maxUploadBytes":null}',
+        '{"maxImageDimension":"100","maxUploadBytes":null}',
+        '{"maxImageDimension":100}',
+    ]) {
+        assert.equal((await request({ method: 'PATCH', body })).status, 400, body);
+    }
+    assert.deepEqual(await getUploadLimits(env), { ...DEFAULT_UPLOAD_LIMITS });
+
+    const configured = { maxImageDimension: 4096, maxUploadBytes: 25 * 1024 * 1024 };
+    const updated = await request({ method: 'PATCH', body: JSON.stringify(configured) });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(await updated.json(), configured);
+    assert.deepEqual(await getUploadLimits(env), configured);
+    const publicConfig = await (await worker.fetch(new Request('https://image.test/api/config'), env, ctx)).json();
+    assert.equal(publicConfig.maxImageDimension, 4096);
+    assert.equal(publicConfig.maxUploadBytes, 25 * 1024 * 1024);
+
+    const unlimited = { maxImageDimension: null, maxUploadBytes: null };
+    assert.deepEqual(await (await request({ method: 'PATCH', body: JSON.stringify(unlimited) })).json(), unlimited);
+    assert.deepEqual(await getUploadLimits(env), unlimited);
+});
+
+test('upload body limit follows configuration and can be disabled', async t => {
+    const { env, ctx, pending } = fixture();
+    const configured = { ...env, AI_MODERATION_ENABLED: 'false' };
+    t.mock.method(globalThis, 'fetch', async url => Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } }));
+    await setUploadLimits(env, { maxImageDimension: null, maxUploadBytes: 16 });
+    assert.equal((await worker.fetch(uploadRequest(), configured, ctx)).status, 413);
+    await setUploadLimits(env, { maxImageDimension: null, maxUploadBytes: null });
+    const accepted = await worker.fetch(uploadRequest(), configured, ctx);
+    assert.equal(accepted.status, 200);
+    assert.match(await accepted.text(), /^[0-9a-z]{32}$/);
+    await Promise.all(pending);
+});
+
 test('fallback refuses unaudited uploads when D1 persistence fails; failed storage removes reserved metadata', async t => {
     const { env, ctx, pending, sqlite } = fixture();
     t.mock.method(console, 'error', () => {});
@@ -824,7 +873,12 @@ test('environment retention and AI configuration affect public configuration and
     const { env, ctx } = fixture();
     const configured = { ...env, IMAGE_RETENTION_DAYS: '30', AI_MODERATION_ENABLED: 'false', AI_MODERATION_FALLBACK: 'deny' };
     const response = await worker.fetch(new Request('https://image.test/api/config'), configured, ctx);
-    assert.deepEqual(await response.json(), { retentionDays: 30, moderationEnabled: false, uploadPasswordRequired: false });
+    assert.deepEqual(await response.json(), {
+        retentionDays: 30,
+        moderationEnabled: false,
+        uploadPasswordRequired: false,
+        ...DEFAULT_UPLOAD_LIMITS,
+    });
     assert.equal(await getFallback(configured), 'deny');
     await recordAccess(env, id, 1000);
     const stats = await getRetentionDistribution(configured, 1000);

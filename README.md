@@ -7,6 +7,7 @@ Built with React, Cloudflare Workers and D1. Images are stored in a dedicated pr
 ## Features
 
 - Upload JPEG, PNG and WebP by selecting, dragging or pasting images.
+- Configure a maximum image edge and upload size independently from the admin settings, or disable either limit.
 - AI moderation, optional upload password and automatic inactivity cleanup.
 - Administration at `/admin/`: image filters, manual review, retention locks, IP controls and traffic statistics.
 
@@ -41,6 +42,8 @@ Use Worker secrets for credentials and the Cloudflare dashboard or `wrangler.jso
 | `AI_MODERATION_ENABLED` | `true` | Set to `false` to skip upload AI assessment. |
 | `AI_MODERATION_TIMEOUT_MS` | `20000` | Assessment timeout; positive, at most 300000 ms. |
 | `AI_MODERATION_FALLBACK` | unset | `allow` or `deny`; overrides the admin setting (initially `allow`). |
+
+Image processing and upload limits are managed in `/admin/` → **Settings**. The defaults are a 1920 px longest edge and a 10 MiB upload body. Each can be changed independently or disabled. Disabling the upload limit removes only the application-level check; Cloudflare request-size limits still apply.
 
 Upgrading from mixed-case names? Recreate `GithubOwner`, `GithubRepo` and `GithubPAT` as `GITHUB_OWNER`, `GITHUB_REPO` and `GITHUB_PAT` before deploying, and update local `.dev.vars`. Old names are no longer read.
 

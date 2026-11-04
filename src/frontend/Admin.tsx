@@ -9,6 +9,7 @@ import { emptyFilters, filterError, imageQuery, jsonBody, type Api, type AuditEv
 import { Icon } from './admin/ui';
 import { Alert, Box, Button, Card, CardContent, CssBaseline, TextField, Typography } from '@mui/material';
 import AdminLayout from './admin/Layout';
+import type { UploadLimits } from '../uploadLimits';
 
 interface Settings { fallback: 'allow' | 'deny'; counts: { status: string; count: number }[] }
 interface ImagePage { images: ImageRow[]; nextCursor: string | null }
@@ -47,6 +48,7 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
   const [days, setDays] = useState(7);
   const [order, setOrder] = useState<'traffic' | 'uploads'>('traffic');
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [uploadLimits, setUploadLimits] = useState<UploadLimits | null>(null);
   const [ips, setIps] = useState<ManagedIp[]>([]);
   const [ipCursor, setIpCursor] = useState<string | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -62,12 +64,14 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
   }
   async function refresh(signal?: AbortSignal) {
     const init = { signal };
-    const [library, traffic, policies, addresses, history] = await Promise.all([
+    const [library, traffic, policies, limits, addresses, history] = await Promise.all([
       api<ImagePage>(`/images?${imageQuery(filters)}`, init), api<Stats>(`/stats?days=${days}&sort=${order}`, init),
-      api<Settings>('/moderation-settings', init), api<IpPage>('/ips', init), api<AuditPage>('/assessment-audit', init),
+      api<Settings>('/moderation-settings', init), api<UploadLimits>('/upload-settings', init),
+      api<IpPage>('/ips', init), api<AuditPage>('/assessment-audit', init),
     ]);
     if (signal?.aborted) return;
     setImages(library.images); setImageCursor(library.nextCursor); setStats(traffic); setSettings(policies);
+    setUploadLimits(limits);
     setIps(addresses.ips); setIpCursor(addresses.nextCursor); setEvents(history.events); setAuditCursor(history.nextCursor); setUpdated(Date.now());
   }
   useEffect(() => {
@@ -103,7 +107,7 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
         {section === 'images' && <ImageLibrary images={images} filters={filters} busy={busy} cursor={imageCursor} retentionMs={stats?.retention.retentionMs ?? 7 * 86400000} onApply={value => void run(() => loadImages(value))} onMore={() => void run(() => loadImages(filters, imageCursor))} onAction={(image, action) => run(async () => { if (action === 'lock') await api(`/images/${image.image_id}/lock`, jsonBody({ locked: !image.locked }, 'PATCH')); else await api(`/images/${image.image_id}/review`, jsonBody({ action })); await refresh(); })} />}
         {section === 'audit' && <ActivityLog events={events} cursor={auditCursor} busy={busy} onMore={() => void run(async () => { const result = await api<AuditPage>(`/assessment-audit?cursor=${auditCursor}`); setEvents(previous => [...previous, ...result.events]); setAuditCursor(result.nextCursor); })} />}
         {section === 'ips' && <NetworkAccess ips={ips} cursor={ipCursor} busy={busy} onUpdate={updateIp} onMore={() => void run(async () => { const result = await api<IpPage>(`/ips?cursor=${encodeURIComponent(ipCursor!)}`); setIps(previous => [...previous, ...result.ips]); setIpCursor(result.nextCursor); })} />}
-        {section === 'settings' && settings && <ModelSettings key={settings.fallback} api={api} run={run} busy={busy} fallback={settings.fallback} onFallback={fallback => setSettings(previous => previous ? { ...previous, fallback } : previous)} />}
+        {section === 'settings' && settings && uploadLimits && <ModelSettings key={settings.fallback} api={api} run={run} busy={busy} fallback={settings.fallback} onFallback={fallback => setSettings(previous => previous ? { ...previous, fallback } : previous)} uploadLimits={uploadLimits} onUploadLimits={setUploadLimits} />}
       </main><footer className="workspace-footer"><span>Image administration</span></footer>
     </div>
   </div>;

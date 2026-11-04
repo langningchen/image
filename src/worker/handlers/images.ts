@@ -9,6 +9,7 @@ import { saveModeration } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
 import { assessmentFailure, getFallback, recordFallback, finishFallback, type FailureDetails } from '../repositories/assessment.ts';
+import { getUploadLimits } from '../repositories/upload-settings.ts';
 
 function imageResponseHeaders(imageId: string, extension: string): HeadersInit {
     return {
@@ -36,6 +37,8 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
     let control;
     try { control = await getIpControl(env, ip); } catch { return failure('Upload temporarily unavailable', 503); }
     if (control && control.banned_until > Date.now()) return failure('Uploads are temporarily suspended. Please try again later.', 403);
+    let uploadLimits;
+    try { uploadLimits = await getUploadLimits(env); } catch { return failure('Upload temporarily unavailable', 503); }
     const reader = request.body?.getReader();
     const chunks: Uint8Array[] = [];
     if (reader) {
@@ -43,7 +46,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
             const { value, done } = await reader.read();
             if (done) break;
             metrics.bytes += value.byteLength;
-            if (metrics.bytes > 10 * 1024 * 1024) {
+            if (uploadLimits.maxUploadBytes !== null && metrics.bytes > uploadLimits.maxUploadBytes) {
                 await reader.cancel();
                 return failure('Image too large', 413);
             }

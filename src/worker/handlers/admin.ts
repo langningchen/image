@@ -8,9 +8,23 @@ import { getFallback, setFallback, listAudit, moderationCounts, approveImage, cl
 import { deleteImageFromGithub } from '../repositories/github.ts';
 import { assessImage } from '../services/moderation.ts';
 import { assessmentFailure } from '../repositories/assessment.ts';
+import { getUploadLimits, setUploadLimits } from '../repositories/upload-settings.ts';
+import type { UploadLimits } from '../../uploadLimits.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+}
+
+function validUploadLimit(value: unknown): value is number | null {
+    return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
+}
+
+function parseUploadLimits(value: unknown): UploadLimits | null {
+    if (!value || typeof value !== 'object') return null;
+    const body = value as Record<string, unknown>;
+    if (!('maxImageDimension' in body) || !('maxUploadBytes' in body)
+        || !validUploadLimit(body.maxImageDimension) || !validUploadLimit(body.maxUploadBytes)) return null;
+    return { maxImageDimension: body.maxImageDimension, maxUploadBytes: body.maxUploadBytes };
 }
 
 async function authorized(request: Request, secret: string): Promise<boolean> {
@@ -27,6 +41,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     if (origin && origin !== url.origin) return json({ error: 'Forbidden' }, 403);
     try {
         if (request.method === 'POST' && url.pathname === '/api/admin/model-test') {
+            const uploadLimits = await getUploadLimits(env);
             const reader = request.body?.getReader();
             if (!reader) return json({ error: 'Image data required' }, 400);
             const decoder = new TextDecoder();
@@ -36,7 +51,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
                 const chunk = await reader.read();
                 if (chunk.done) break;
                 bytes += chunk.value.byteLength;
-                if (bytes > 10 * 1024 * 1024) {
+                if (uploadLimits.maxUploadBytes !== null && bytes > uploadLimits.maxUploadBytes) {
                     await reader.cancel();
                     return json({ error: 'Image too large' }, 413);
                 }
@@ -50,6 +65,17 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             } catch (error) {
                 const details = assessmentFailure(error, env);
                 return json({ ok: false, ...details }, 422);
+            }
+        }
+        if (url.pathname === '/api/admin/upload-settings') {
+            if (request.method === 'GET') return json(await getUploadLimits(env));
+            if (request.method === 'PATCH') {
+                let body: unknown;
+                try { body = await request.json(); } catch { return json({ error: 'Invalid request' }, 400); }
+                const limits = parseUploadLimits(body);
+                if (!limits) return json({ error: 'Limits must be positive integers or null' }, 400);
+                await setUploadLimits(env, limits);
+                return json(limits);
             }
         }
         if (url.pathname === '/api/admin/moderation-settings') {

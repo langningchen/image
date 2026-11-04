@@ -1,5 +1,14 @@
-export async function prepareImage(dataUrl: string, size: number, quality = 0.8): Promise<string> {
-  if (size <= 1024 * 1024 || dataUrl.startsWith('data:image/png;')) return dataUrl;
+import { DEFAULT_UPLOAD_LIMITS } from '../uploadLimits.ts';
+
+export async function prepareImage(
+  dataUrl: string,
+  maxImageDimension: number | null = DEFAULT_UPLOAD_LIMITS.maxImageDimension,
+  quality = 0.8,
+): Promise<string> {
+  if (maxImageDimension === null) return dataUrl;
+  if (!Number.isSafeInteger(maxImageDimension) || maxImageDimension <= 0) {
+    throw new Error('Invalid image dimension limit');
+  }
   return new Promise((resolve, reject) => {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -7,20 +16,24 @@ export async function prepareImage(dataUrl: string, size: number, quality = 0.8)
     const img = new Image();
 
     img.onload = () => {
-      // Calculate new dimensions (max 1920px width)
       let { width, height } = img;
-      const maxWidth = 1920;
-      if (width > maxWidth) {
-        height = (height * maxWidth) / width;
-        width = maxWidth;
+      const longestEdge = Math.max(width, height);
+      if (!Number.isFinite(longestEdge) || longestEdge <= 0 || longestEdge <= maxImageDimension) {
+        resolve(dataUrl);
+        return;
       }
+      const scale = maxImageDimension / longestEdge;
+      width = Math.max(1, Math.round(width * scale));
+      height = Math.max(1, Math.round(height * scale));
 
       canvas.width = width;
       canvas.height = height;
       ctx.drawImage(img, 0, 0, width, height);
 
-      // Compress and return
-      resolve(canvas.toDataURL(dataUrl.startsWith('data:image/webp;') ? 'image/webp' : 'image/jpeg', quality));
+      const outputType = dataUrl.startsWith('data:image/png;')
+        ? 'image/png'
+        : dataUrl.startsWith('data:image/webp;') ? 'image/webp' : 'image/jpeg';
+      resolve(canvas.toDataURL(outputType, quality));
     };
 
     img.onerror = () => reject(new Error('Invalid image data'));
