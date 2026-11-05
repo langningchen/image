@@ -43,7 +43,7 @@ Use Worker secrets for credentials and the Cloudflare dashboard or `wrangler.jso
 | `AI_MODERATION_TIMEOUT_MS` | `20000` | Assessment timeout; positive, at most 300000 ms. |
 | `AI_MODERATION_FALLBACK` | unset | `allow` or `deny`; overrides the admin setting (initially `allow`). |
 
-Image processing and upload limits are managed in `/admin/` → **Settings**. The defaults are a 1920 px longest edge and a 10 MiB upload body. Each can be changed independently or disabled. Disabling the upload limit removes only the application-level check; Cloudflare request-size limits still apply.
+Image processing and upload limits are managed in `/admin/` → **Settings**. The defaults are a 1920 px longest edge and a 10 MiB upload body. Each can be changed independently or disabled. The uploader resizes oversized images, while the Worker independently rejects direct uploads over the configured edge. Disabling the upload limit removes only the application-level check; Cloudflare request-size limits still apply.
 
 Upgrading from mixed-case names? Recreate `GithubOwner`, `GithubRepo` and `GithubPAT` as `GITHUB_OWNER`, `GITHUB_REPO` and `GITHUB_PAT` before deploying, and update local `.dev.vars`. Old names are no longer read.
 
