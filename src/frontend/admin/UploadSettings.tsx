@@ -53,6 +53,12 @@ export default function UploadSettings({
     onLimits(next);
   }
 
+  function draftUploadBytes(): number | null {
+    if (uploadUnlimited) return null;
+    if (limits.maxUploadBytes !== null && maxUploadMiB === formatMiB(limits.maxUploadBytes)) return limits.maxUploadBytes;
+    return Math.round(Number(maxUploadMiB) * MEBIBYTE);
+  }
+
   async function save() {
     setError('');
     setSaved(false);
@@ -61,7 +67,7 @@ export default function UploadSettings({
       setError('Maximum image edge must be a positive whole number, or choose No limit.');
       return;
     }
-    const uploadBytes = uploadUnlimited ? null : Math.round(Number(maxUploadMiB) * MEBIBYTE);
+    const uploadBytes = draftUploadBytes();
     if (uploadBytes !== null && (!maxUploadMiB.trim() || !Number.isFinite(Number(maxUploadMiB)) || !Number.isSafeInteger(uploadBytes) || uploadBytes <= 0)) {
       setError('Maximum upload size must be a positive number of MiB, or choose No limit.');
       return;
@@ -129,7 +135,7 @@ export default function UploadSettings({
       </div>
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
       {saved && <Alert severity="success" sx={{ mt: 2 }}>Upload limits saved.</Alert>}
-      <AdminButton className="button primary" disabled={busy || sameLimits({ maxImageDimension: dimensionUnlimited ? null : Number(maxImageDimension), maxUploadBytes: uploadUnlimited ? null : Math.round(Number(maxUploadMiB) * MEBIBYTE) }, limits)} onClick={() => void save()}>
+      <AdminButton className="button primary" disabled={busy || sameLimits({ maxImageDimension: dimensionUnlimited ? null : Number(maxImageDimension), maxUploadBytes: draftUploadBytes() }, limits)} onClick={() => void save()}>
         Save limits<Icon name="check" size={16} />
       </AdminButton>
     </div>
