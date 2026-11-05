@@ -26,6 +26,41 @@ test('the configured dimension scales the longest edge and preserves the image f
     assert.deepEqual(canvas.output, { type: 'image/png', quality: 0.8 });
 });
 
+test('oversized animated PNGs are rejected instead of being flattened', async t => {
+    const canvas = mockBrowserImage(4000, 3000);
+    t.after(canvas.restore);
+    await assert.rejects(prepareImage(animatedPng(), 1920), /Animated PNG exceeds the 1920 px image dimension limit/);
+    assert.equal(canvas.drawCalls, 0);
+});
+
+test('animated PNGs within the dimension limit retain their original bytes', async t => {
+    const image = animatedPng();
+    const canvas = mockBrowserImage(800, 600);
+    t.after(canvas.restore);
+    assert.equal(await prepareImage(image, 1920), image);
+    assert.equal(canvas.drawCalls, 0);
+});
+
+function animatedPng(): string {
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    const bytes = [
+        ...signature,
+        ...pngChunk('IHDR', Array(13).fill(0)),
+        ...pngChunk('acTL', [0, 0, 0, 1, 0, 0, 0, 0]),
+        ...pngChunk('IEND'),
+    ];
+    return `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+}
+
+function pngChunk(type: string, data: number[] = []): number[] {
+    return [
+        data.length >>> 24, (data.length >>> 16) & 255, (data.length >>> 8) & 255, data.length & 255,
+        ...Array.from(type, character => character.charCodeAt(0)),
+        ...data,
+        0, 0, 0, 0,
+    ];
+}
+
 function mockBrowserImage(width: number, height: number, output = 'data:image/jpeg;base64,prepared') {
     const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
     const originalImage = Object.getOwnPropertyDescriptor(globalThis, 'Image');
