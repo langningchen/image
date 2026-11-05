@@ -1,22 +1,12 @@
+import isApng from 'is-apng';
 import { DEFAULT_UPLOAD_LIMITS } from '../uploadLimits.ts';
+import { decodeBase64 } from '../base64.ts';
 
-export function isAnimatedPngDataUrl(dataUrl: string): boolean {
+function isAnimatedPngDataUrl(dataUrl: string): boolean {
   const match = dataUrl.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/);
   if (!match) return false;
-  let binary: string;
-  try { binary = atob(match[1]); } catch { return false; }
-  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-  if (binary.length < signature.length || signature.some((byte, index) => binary.charCodeAt(index) !== byte)) return false;
-  let offset = signature.length;
-  while (offset + 12 <= binary.length) {
-    const length = ((binary.charCodeAt(offset) << 24) | (binary.charCodeAt(offset + 1) << 16)
-      | (binary.charCodeAt(offset + 2) << 8) | binary.charCodeAt(offset + 3)) >>> 0;
-    if (offset + 12 + length > binary.length) return false;
-    if (binary.slice(offset + 4, offset + 8) === 'acTL') return true;
-    if (binary.slice(offset + 4, offset + 8) === 'IEND') return false;
-    offset += 12 + length;
-  }
-  return false;
+  const bytes = decodeBase64(match[1]);
+  return bytes !== null && isApng(bytes);
 }
 
 export async function prepareImage(

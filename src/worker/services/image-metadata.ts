@@ -1,4 +1,5 @@
 import { imageSize } from 'image-size';
+import { decodeBase64 } from '../../base64.ts';
 
 export interface ImageDimensions {
     width: number;
@@ -25,12 +26,6 @@ export function imageDimensions(bytes: Uint8Array, mimeType: string): ImageDimen
 }
 
 export function imageDimensionsFromBase64(mimeType: string, base64: string): ImageDimensions | null {
-    try {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-        return imageDimensions(bytes, mimeType);
-    } catch {
-        return null;
-    }
+    const bytes = decodeBase64(base64);
+    return bytes === null ? null : imageDimensions(bytes, mimeType);
 }

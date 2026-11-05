@@ -181,6 +181,9 @@ importers:
       image-size:
         specifier: ^2.0.4
         version: 2.0.4
+      is-apng:
+        specifier: ^1.2.0
+        version: 1.2.0
       react:
         specifier: ^19.3.0
         version: 19.3.0
@@ -1442,6 +1445,10 @@ packages:
   import-fresh@3.3.1:
     resolution: {integrity: sha512-TR3KfrTZTYLPB6jUjfx6MF9WcWrHL9su5TObK4ZkYgBdWKPOFoSoQIdEuTuR82pmtxH2spWG9h6etwfr1pLBqQ==}
     engines: {node: '>=6'}
+
+  is-apng@1.2.0:
+    resolution: {integrity: sha512-xgnGhMmFhHUYnVbNJsWRy0JaYSbHpESWqQAwKXlac9jIl4xRFTvqwNdurltD7AlX+NeXpRVs379UeqjM9C36ow==}
+    engines: {node: '>=18'}
 
   is-arrayish@0.2.1:
     resolution: {integrity: sha512-zz06S8t0ozoDXMG+ube26zeCTNXcKIPJZJi8hBrF4idCLms4CG9QtK7qBl1boi5ODzFpjswb5JPmHCbMpjaYzg==}
@@ -2801,6 +2808,8 @@ snapshots:
     dependencies:
       parent-module: 1.0.1
       resolve-from: 4.0.0
+
+  is-apng@1.2.0: {}
 
   is-arrayish@0.2.1: {}
 
