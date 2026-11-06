@@ -5,12 +5,17 @@ import { LLAMA_LICENSE_URL, LLAMA_POLICY_URL } from '../../terms';
 import { prepareImage } from '../prepareImage';
 import { jsonBody, type Api, type Run } from './model';
 import { Evidence, Icon } from './ui';
+import UploadSettings from './UploadSettings';
+import type { UploadLimits } from '../../uploadLimits';
 
 interface ModelTest {
   file: string; ok: boolean; verdict?: { approved: boolean; reason: string };
   responseType?: string; durationMs?: number; error?: string; modelResponse?: string;
 }
-export default function ModelSettings({ api, run, busy, fallback, onFallback }: { api: Api; run: Run; busy: boolean; fallback: 'allow' | 'deny'; onFallback: (value: 'allow' | 'deny') => void }) {
+export default function ModelSettings({ api, run, busy, fallback, onFallback, uploadLimits, onUploadLimits }: {
+  api: Api; run: Run; busy: boolean; fallback: 'allow' | 'deny'; onFallback: (value: 'allow' | 'deny') => void;
+  uploadLimits: UploadLimits; onUploadLimits: (limits: UploadLimits) => void;
+}) {
   const [license, setLicense] = useState(false);
   const [eligible, setEligible] = useState(false);
   const [activated, setActivated] = useState(false);
@@ -25,12 +30,13 @@ export default function ModelSettings({ api, run, busy, fallback, onFallback }: 
         reader.onerror = () => reject(new Error('Could not read this image.'));
         reader.readAsDataURL(file);
       });
-      const image = await prepareImage(dataUrl, file.size);
+      const image = await prepareImage(dataUrl, uploadLimits.maxImageDimension);
       const response = await api<Omit<ModelTest, 'file'>>('/model-test', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: image }, true);
       setResult({ ...response, file: file.name });
     });
   }
   return <div className="settings-stack">
+    <UploadSettings api={api} run={run} busy={busy} limits={uploadLimits} onLimits={onUploadLimits} />
     <section className="settings-section"><div className="settings-description"><span className="eyebrow">UPLOAD POLICY</span><h2>When AI is unavailable</h2><p>Choose what happens if assessment times out, fails, or returns an inconclusive answer.</p></div><div className="panel settings-card"><h3>Assessment fallback</h3><div className="policy-options">
       {(['allow', 'deny'] as const).map(value => <label className={`policy-option ${policy === value ? 'chosen' : ''}`} key={value}><AdminInput type="radio" name="fallback" value={value} checked={policy === value} disabled={busy} onChange={() => setPolicy(value)} /><span><strong>{value === 'allow' ? 'Allow and queue for review' : 'Reject the upload'}</strong><small>{value === 'allow' ? 'Keep the image and flag it for a manual decision.' : 'Keep an audit record without storing the image.'}</small></span></label>)}
     </div><p className="field-help">Explicitly prohibited content is always rejected. A policy managed by the environment cannot be changed here.</p><AdminButton className="button primary" disabled={busy || policy === fallback} onClick={() => void run(async () => { const response = await api<{ fallback: 'allow' | 'deny' }>('/moderation-settings', jsonBody({ fallback: policy }, 'PATCH')); onFallback(response.fallback); })}>Save policy</AdminButton></div></section>

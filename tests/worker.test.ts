@@ -12,9 +12,14 @@ import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
 import { setFallback, getFallback } from '../src/worker/repositories/assessment.ts';
 import { parseVerdict, AssessmentError, moderateImage } from '../src/worker/services/moderation.ts';
+import { getUploadLimits, setUploadLimits } from '../src/worker/repositories/upload-settings.ts';
+import { DEFAULT_UPLOAD_LIMITS } from '../src/uploadLimits.ts';
 
 const id = 'a1'.repeat(16);
 const second = 'b2'.repeat(16);
+const ONE_PIXEL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
+const ONE_PIXEL_WEBP = 'UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJQBOgCHwAP7+4AAAAA==';
+const ONE_PIXEL_PNG_DATA_URL = `data:image/png;base64,${ONE_PIXEL_PNG}`;
 function fixture(alphanumericIds = true) {
     const sqlite = new DatabaseSync(':memory:');
     sqlite.exec(readFileSync(new URL('../migrations/0001_image_access.sql', import.meta.url), 'utf8'));
@@ -23,6 +28,7 @@ function fixture(alphanumericIds = true) {
     sqlite.exec(readFileSync(new URL('../migrations/0004_ip_geolocation.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0005_moderation_fallback.sql', import.meta.url), 'utf8'));
     if (alphanumericIds) sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/0007_upload_limits.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
@@ -67,12 +73,13 @@ test('upload initializes D1, previews do not renew and conditional views do rene
     let uploaded = '';
     t.mock.method(globalThis, 'fetch', async (url, init) => {
         if (init?.method === 'PUT') {
-            uploaded = new URL(url).pathname.split('/').at(-1).slice(0, -5);
-            return Response.json({ content: { name: `${uploaded}.jpeg` } });
+            const uploadedName = new URL(url).pathname.split('/').at(-1)!;
+            uploaded = uploadedName.slice(0, -4);
+            return Response.json({ content: { name: uploadedName } });
         }
         return new Response('image bytes');
     });
-    const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: 'data:image/jpeg;base64,aGVsbG8=' }), env, ctx);
+    const response = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: ONE_PIXEL_PNG_DATA_URL }), env, ctx);
     assert.match(await response.text(), /^[0-9a-z]{32}$/);
     assert.equal(uploaded.length, 32);
     assert.ok(await getAccessTime(env, uploaded));
@@ -177,7 +184,7 @@ function adminRequest(path: string, init: RequestInit = {}, password = 'test-pas
     return new Request(`https://image.test/api/admin${path}`, { ...init, headers: { 'Authorization': `Bearer ${password}`, 'Content-Type': 'application/json', ...init.headers } });
 }
 function uploadRequest(ip = '203.0.113.1') {
-    return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip, [CONSENT_HEADER]: TERMS_VERSION }, body: 'data:image/jpeg;base64,aGVsbG8=' });
+    return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip, [CONSENT_HEADER]: TERMS_VERSION }, body: ONE_PIXEL_PNG_DATA_URL });
 }
 
 test('uploads require current consent before reading data or invoking AI, including exempt IPs', async t => {
@@ -432,8 +439,7 @@ test('PNG and WebP uploads preserve bytes, file extensions and response MIME typ
         return bytes ? new Response(Buffer.from(bytes, 'base64')) : new Response(null, { status: 404 });
     });
     // A transparent one-pixel PNG must survive the complete storage round trip.
-    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
-    for (const [extension, bytes] of [['png', png], ['webp', 'UklGRg==']]) {
+    for (const [extension, bytes] of [['png', ONE_PIXEL_PNG], ['webp', ONE_PIXEL_WEBP]]) {
         const upload = await worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION }, body: `data:image/${extension};base64,${bytes}` }), env, ctx);
         assert.equal(upload.status, 200);
         const imageId = await upload.text();
@@ -497,11 +503,12 @@ test('default allow fallback uploads non-JSON responses and provider failures in
     let writes = 0;
     t.mock.method(globalThis, 'fetch', async (url, init) => {
         assert.equal(init.method, 'PUT'); writes++;
-        const imageId = new URL(url).pathname.split('/').at(-1).split('.')[0];
+        const uploadedName = new URL(url).pathname.split('/').at(-1)!;
+        const imageId = uploadedName.split('.')[0];
         // Audit and review metadata must already exist before storing the bytes.
         assert.equal(sqlite.prepare('SELECT moderation_status FROM image_access WHERE image_id = ?').get(imageId).moderation_status, 'error');
         assert.equal(sqlite.prepare('SELECT outcome FROM assessment_audit WHERE image_id = ?').get(imageId).outcome, 'pending');
-        return Response.json({ content: { name: `${imageId}.jpeg` } });
+        return Response.json({ content: { name: uploadedName } });
     });
     assert.equal(await getFallback(env), 'allow');
     const failures = ['The image shows a landscape.', '{"approved":false,"reason":"unassessable"}', 'provider'];
@@ -553,6 +560,87 @@ test('fallback settings require authentication, validate inputs and denied attem
     assert.equal(event.outcome, 'denied');
     assert.equal(event.image_id, null);
     assert.equal(event.model_response, 'The image shows a landscape.');
+    await Promise.all(pending);
+});
+
+test('upload limits can be configured independently and are exposed to uploaders', async () => {
+    const { env, ctx } = fixture();
+    const request = (init: RequestInit = {}, password = 'test-password') => worker.fetch(adminRequest('/upload-settings', init, password), env, ctx);
+    assert.deepEqual(await (await request()).json(), { ...DEFAULT_UPLOAD_LIMITS });
+    assert.equal((await request({}, 'wrong')).status, 401);
+    assert.equal((await request({ method: 'PATCH', headers: { Origin: 'https://other.test' }, body: '{"maxImageDimension":null,"maxUploadBytes":null}' })).status, 403);
+    for (const body of [
+        '{}',
+        'invalid',
+        '{"maxImageDimension":0,"maxUploadBytes":null}',
+        '{"maxImageDimension":100,"maxUploadBytes":-1}',
+        '{"maxImageDimension":100.5,"maxUploadBytes":null}',
+        '{"maxImageDimension":"100","maxUploadBytes":null}',
+        '{"maxImageDimension":100}',
+    ]) {
+        assert.equal((await request({ method: 'PATCH', body })).status, 400, body);
+    }
+    assert.deepEqual(await getUploadLimits(env), { ...DEFAULT_UPLOAD_LIMITS });
+
+    const configured = { maxImageDimension: 4096, maxUploadBytes: 25 * 1024 * 1024 };
+    const updated = await request({ method: 'PATCH', body: JSON.stringify(configured) });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(await updated.json(), configured);
+    assert.deepEqual(await getUploadLimits(env), configured);
+    const publicConfig = await (await worker.fetch(new Request('https://image.test/api/config'), env, ctx)).json();
+    assert.equal(publicConfig.maxImageDimension, 4096);
+    assert.equal(publicConfig.maxUploadBytes, 25 * 1024 * 1024);
+
+    const unlimited = { maxImageDimension: null, maxUploadBytes: null };
+    assert.deepEqual(await (await request({ method: 'PATCH', body: JSON.stringify(unlimited) })).json(), unlimited);
+    assert.deepEqual(await getUploadLimits(env), unlimited);
+});
+
+test('upload body limit follows configuration and can be disabled', async t => {
+    const { env, ctx, pending } = fixture();
+    const configured = { ...env, AI_MODERATION_ENABLED: 'false' };
+    t.mock.method(globalThis, 'fetch', async url => Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } }));
+    await setUploadLimits(env, { maxImageDimension: null, maxUploadBytes: 16 });
+    assert.equal((await worker.fetch(uploadRequest(), configured, ctx)).status, 413);
+    await setUploadLimits(env, { maxImageDimension: null, maxUploadBytes: null });
+    const accepted = await worker.fetch(uploadRequest(), configured, ctx);
+    assert.equal(accepted.status, 200);
+    assert.match(await accepted.text(), /^[0-9a-z]{32}$/);
+    await Promise.all(pending);
+});
+
+test('direct uploads enforce the image dimension limit before assessment or storage', async t => {
+    const { env, ctx, pending } = fixture();
+    const landscape = readFileSync(new URL('./fixtures/moderation/landscape.png', import.meta.url)).toString('base64');
+    const body = `data:image/png;base64,${landscape}`;
+    let aiCalls = 0;
+    let writes = 0;
+    env.AI.run = async () => {
+        aiCalls += 1;
+        return { response: '{"approved":true,"reason":"safe"}' };
+    };
+    t.mock.method(globalThis, 'fetch', async url => {
+        writes += 1;
+        return Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } });
+    });
+    const upload = () => worker.fetch(new Request('https://image.test/upload', {
+        method: 'POST',
+        headers: { [CONSENT_HEADER]: TERMS_VERSION },
+        body,
+    }), env, ctx);
+
+    await setUploadLimits(env, { maxImageDimension: 100, maxUploadBytes: null });
+    const rejected = await upload();
+    assert.equal(rejected.status, 413);
+    assert.match(await rejected.text(), /512x384 exceed the configured 100 px limit/);
+    assert.equal(aiCalls, 0);
+    assert.equal(writes, 0);
+
+    await setUploadLimits(env, { maxImageDimension: null, maxUploadBytes: null });
+    const accepted = await upload();
+    assert.equal(accepted.status, 200);
+    assert.equal(aiCalls, 1);
+    assert.equal(writes, 1);
     await Promise.all(pending);
 });
 
@@ -824,7 +912,12 @@ test('environment retention and AI configuration affect public configuration and
     const { env, ctx } = fixture();
     const configured = { ...env, IMAGE_RETENTION_DAYS: '30', AI_MODERATION_ENABLED: 'false', AI_MODERATION_FALLBACK: 'deny' };
     const response = await worker.fetch(new Request('https://image.test/api/config'), configured, ctx);
-    assert.deepEqual(await response.json(), { retentionDays: 30, moderationEnabled: false, uploadPasswordRequired: false });
+    assert.deepEqual(await response.json(), {
+        retentionDays: 30,
+        moderationEnabled: false,
+        uploadPasswordRequired: false,
+        ...DEFAULT_UPLOAD_LIMITS,
+    });
     assert.equal(await getFallback(configured), 'deny');
     await recordAccess(env, id, 1000);
     const stats = await getRetentionDistribution(configured, 1000);
@@ -901,7 +994,7 @@ test('optional upload password rejects missing/wrong credentials before AI or st
     env.AI.run = async () => { aiCalls++; return { response: JSON.stringify({ approved: true, reason: 'safe' }) }; };
     t.mock.method(globalThis, 'fetch', async (url) => { writes++; return Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } }); });
     const configured = { ...env, UPLOAD_PASSWORD: 'upload-secret', AI_MODERATION_ENABLED: 'false' };
-    const upload = (password: string) => worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION, 'X-Upload-Password': password }, body: 'data:image/jpeg;base64,aGVsbG8=' }), configured, ctx);
+    const upload = (password: string) => worker.fetch(new Request('https://image.test/upload', { method: 'POST', headers: { [CONSENT_HEADER]: TERMS_VERSION, 'X-Upload-Password': password }, body: ONE_PIXEL_PNG_DATA_URL }), configured, ctx);
     assert.equal((await upload('')).status, 401);
     assert.equal((await upload('wrong')).status, 401);
     assert.equal(aiCalls, 0);
