@@ -11,6 +11,7 @@ import { Alert, Box, Button, Card, CardContent, CssBaseline, TextField, Typograp
 import AdminLayout from './admin/Layout';
 import type { UploadLimits } from '../uploadLimits';
 
+interface CleanupResult { deleted: number; failed: number; failures: string[] }
 interface Settings { fallback: 'allow' | 'deny'; counts: { status: string; count: number }[] }
 interface ImagePage { images: ImageRow[]; nextCursor: string | null }
 interface IpPage { ips: ManagedIp[]; nextCursor: string | null }
@@ -41,6 +42,8 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
   const [section, setSection] = useState<Section>('overview');
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
+  const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null);
+  const [cleaning, setCleaning] = useState(false);
   const [images, setImages] = useState<ImageRow[]>([]);
   const [imageCursor, setImageCursor] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>(emptyFilters);
@@ -92,6 +95,19 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
     const traffic = await api<Stats>(`/stats?days=${value}&sort=${nextOrder}`);
     setDays(value); setOrder(nextOrder); setStats(traffic); setUpdated(Date.now());
   }
+  async function cleanup() {
+    setCleanupResult(null);
+    setCleaning(true);
+    try {
+      await run(async () => {
+        const result = await api<CleanupResult>('/cleanup', { method: 'POST' });
+        setCleanupResult(result);
+        await refresh();
+      });
+    } finally {
+      setCleaning(false);
+    }
+  }
   const updateIp = (ip: string, action: string) => run(async () => {
     await api('/ips', jsonBody({ ip, action }, 'PATCH'));
     const result = await api<IpPage>('/ips'); setIps(result.ips); setIpCursor(result.nextCursor);
@@ -100,8 +116,11 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
     <a className="skip-link" href="#admin-main">Skip to content</a>
     <aside className="sidebar"><Brand /><nav aria-label="Administration">{sections.map(item => <AdminButton key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} aria-label={item.title} title={item.title} aria-current={section === item.id ? 'page' : undefined} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.title}</span>{item.id === 'images' && needsReview > 0 && <span className="nav-count">{needsReview}</span>}</AdminButton>)}</nav><div className="sidebar-bottom"><AdminButton className="nav-item" aria-label="Sign out" title="Sign out" disabled={busy} onClick={onSignOut}><Icon name="logout" /><span>Sign out</span></AdminButton></div></aside>
     <div className="workspace"><header className="topbar"><div className="breadcrumb">Workspace <Icon name="chevron" size={12} /><span>{current.title}</span></div><span className="topbar-status">Authenticated session</span></header>
-      <main id="admin-main" className="main-content" aria-busy={busy}><div className="page-heading"><div><h1>{current.title}</h1><p>{current.description}</p></div><div className="heading-actions">{section === 'overview' && <div className="segmented" aria-label="Analytics period">{[7, 30, 90].map(value => <AdminButton key={value} disabled={busy} aria-pressed={days === value} className={days === value ? 'selected' : ''} onClick={() => void run(() => changePeriod(value))}>{value} days</AdminButton>)}</div>}<AdminButton className="button refresh-button" disabled={busy} onClick={() => void run(() => refresh())}><Icon name="refresh" size={16} /><span>{busy ? 'Updating…' : 'Refresh'}</span></AdminButton></div></div>
+      <main id="admin-main" className="main-content" aria-busy={busy}><div className="page-heading"><div><h1>{current.title}</h1><p>{current.description}</p></div><div className="heading-actions">{section === 'overview' && <div className="segmented" aria-label="Analytics period">{[7, 30, 90].map(value => <AdminButton key={value} disabled={busy} aria-pressed={days === value} className={days === value ? 'selected' : ''} onClick={() => void run(() => changePeriod(value))}>{value} days</AdminButton>)}</div>}{(section === 'overview' || section === 'images') && <AdminButton className="button" disabled={busy || cleaning} title="Delete all expired, unlocked images across the entire library" onClick={() => void cleanup()}><Icon name="refresh" size={16} />{cleaning ? 'Cleaning…' : 'Clean up expired images'}</AdminButton>}<AdminButton className="button refresh-button" disabled={busy} onClick={() => void run(() => refresh())}><Icon name="refresh" size={16} /><span>{busy ? 'Updating…' : 'Refresh'}</span></AdminButton></div></div>
         {error && <Alert severity="error" className="error-banner"><span>{error}</span><AdminButton className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={17} /></AdminButton></Alert>}
+        {cleanupResult && <Alert severity={cleanupResult.failed ? 'warning' : 'success'} sx={{ mb: 2 }} onClose={() => setCleanupResult(null)}>
+          {cleanupResult.failed ? `Cleanup finished with failures: ${cleanupResult.deleted} deleted, ${cleanupResult.failed} failed. ${cleanupResult.failures[0] ?? ''}` : cleanupResult.deleted ? `Cleanup complete: ${cleanupResult.deleted} expired images deleted.` : 'Cleanup complete. No expired images needed deletion.'}
+        </Alert>}
         {busy && <div className="loading-line" role="status" aria-label="Loading" />}
         {section === 'overview' && <>{needsReview > 0 && <AdminButton className="review-banner" disabled={busy} onClick={() => explore({ ...emptyFilters, status: 'error' })}><span className="review-banner-icon"><Icon name="audit" /></span><span><strong>{needsReview} {needsReview === 1 ? 'image needs' : 'images need'} your attention</strong><small>AI assessment was unavailable. Review these images when you’re ready.</small></span><span className="review-banner-action">Open review queue<Icon name="arrow" size={17} /></span></AdminButton>}{stats ? <AdminAnalytics stats={stats} busy={busy} order={order} onOrderChange={value => void run(() => changePeriod(days, value))} onExplore={explore} /> : <div className="panel initial-loading"><Icon name="overview" size={28} /><h3>{busy ? 'Getting your workspace ready…' : 'Could not load the overview'}</h3><p>{busy ? 'Gathering your library and activity.' : 'Use Refresh to try again.'}</p></div>}<div className="overview-footer"><span>{updated ? `Updated ${new Date(updated).toLocaleTimeString()}` : 'Awaiting data'}</span><AdminButton className="text-link" disabled={busy} onClick={() => explore(emptyFilters)}>Explore your library<Icon name="arrow" size={15} /></AdminButton></div></>}
         {section === 'images' && <ImageLibrary images={images} filters={filters} busy={busy} cursor={imageCursor} retentionMs={stats?.retention.retentionMs ?? 7 * 86400000} onApply={value => void run(() => loadImages(value))} onMore={() => void run(() => loadImages(filters, imageCursor))} onAction={(image, action) => run(async () => { if (action === 'lock') await api(`/images/${image.image_id}/lock`, jsonBody({ locked: !image.locked }, 'PATCH')); else await api(`/images/${image.image_id}/review`, jsonBody({ action })); await refresh(); })} />}

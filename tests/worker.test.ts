@@ -245,6 +245,84 @@ function uploadRequest(ip = '203.0.113.1') {
     return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip, [CONSENT_HEADER]: TERMS_VERSION }, body: ONE_PIXEL_PNG_DATA_URL });
 }
 
+test('manual cleanup requires admin authentication and same-origin POST requests', async t => {
+    const { env, ctx } = fixture();
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('Unexpected GitHub request'); });
+    assert.equal((await worker.fetch(adminRequest('/cleanup', { method: 'POST' }, 'wrong'), env, ctx)).status, 401);
+    assert.equal((await worker.fetch(adminRequest('/cleanup', { method: 'POST', headers: { Origin: 'https://other.test' } }), env, ctx)).status, 403);
+    assert.equal((await worker.fetch(adminRequest('/cleanup'), env, ctx)).status, 404);
+    assert.equal(calls, 0);
+});
+
+test('manual cleanup removes due images in one commit and preserves locked, active and untracked images', async t => {
+    const { env, ctx } = fixture();
+    const now = RETENTION_MS * 3;
+    t.mock.method(Date, 'now', () => now);
+    const active = 'c3'.repeat(16), untracked = 'd4'.repeat(16), orphan = 'e5'.repeat(16);
+    await recordAccess(env, id, now - RETENTION_MS);
+    await recordAccess(env, second, 1);
+    await setLocked(env, second, true);
+    await recordAccess(env, active, now);
+    await recordAccess(env, orphan, 1);
+    const { trees, commits } = mockCleanupGithub(t, [id, second, active, untracked].map(image => `${image}.png`));
+    const response = await worker.fetch(adminRequest('/cleanup', { method: 'POST', body: JSON.stringify({ now: now + RETENTION_MS * 5 }) }), env, ctx);
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.success, true);
+    assert.equal(result.deleted, 1);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.initialized, 1);
+    assert.equal(result.orphanedMetadataRemoved, 1);
+    assert.equal(commits.length, 1);
+    assert.deepEqual(trees[0].tree.map((entry: any) => entry.path), [`${id}.png`]);
+    assert.equal(await getAccessTime(env, id), null);
+    assert.equal(await getAccessTime(env, second), 1);
+    assert.equal(await getAccessTime(env, active), now);
+    assert.equal(await getAccessTime(env, untracked), now);
+    assert.equal(await getAccessTime(env, orphan), null);
+});
+
+test('manual cleanup reports deletion failures and releases claims for a retry', async t => {
+    const { env, ctx } = fixture();
+    const now = RETENTION_MS * 3;
+    t.mock.method(Date, 'now', () => now);
+    t.mock.method(console, 'error', () => {});
+    await recordAccess(env, id, 1);
+    await recordAccess(env, second, 1);
+    mockCleanupGithub(t, [`${id}.png`, `${second}.webp`], { fail: true });
+    const response = await worker.fetch(adminRequest('/cleanup', { method: 'POST' }), env, ctx);
+    const result = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(result.success, false);
+    assert.equal(result.deleted, 0);
+    assert.equal(result.failed, 2);
+    assert.match(result.failures[0], /Update default branch failed \(GitHub HTTP 409\)/);
+    assert.equal(await getAccessTime(env, id), 1);
+    assert.equal(await getAccessTime(env, second), 1);
+    assert.equal(await claimDeletion(env, id, now), true);
+    assert.equal(await claimDeletion(env, second, now), true);
+});
+
+test('manual cleanup reports no-op runs and surfaces initial GitHub failures', async t => {
+    const { env, ctx } = fixture();
+    await recordAccess(env, id, Date.now());
+    const { commits } = mockCleanupGithub(t, [`${id}.jpeg`]);
+    const response = await worker.fetch(adminRequest('/cleanup', { method: 'POST' }), env, ctx);
+    const result = await response.json();
+    assert.equal(result.success, true);
+    assert.equal(result.deleted, 0);
+    assert.equal(result.failed, 0);
+    assert.equal(commits.length, 0);
+    t.mock.method(console, 'error', () => {});
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ truncated: true }));
+    const failure = await worker.fetch(adminRequest('/cleanup', { method: 'POST' }), env, ctx);
+    assert.equal(failure.status, 502);
+    assert.match((await failure.json()).error, /run image cleanup.*truncated/);
+    assert.ok(await getAccessTime(env, id));
+});
+
 test('repository configuration sync requires admin credentials and same-origin requests', async t => {
     const { env, ctx } = fixture();
     let calls = 0;

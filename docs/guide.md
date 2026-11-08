@@ -134,6 +134,12 @@ The importer accepts Wrangler key-list metadata (`name`, `metadata.lastAccessedA
 
 If you skip importing, the first daily cleanup initializes existing images with a fresh configured inactivity grace period. After verifying D1 in production, retire the old KV namespace manually.
 
+## Run image cleanup manually
+
+In `/admin/` → **Overview** or **Image library**, click **Clean up expired images** to run the same image cleanup as the daily Worker cron. It deletes all expired, unlocked images across the library, regardless of the current filters. Recently accessed and locked images are preserved; images without access metadata receive a fresh retention period. All eligible file deletions share one Git commit. The page refreshes after the run and shows deletion and failure counts, including GitHub error details when available.
+
+The authenticated endpoint is `POST /api/admin/cleanup`; it uses the server's current time and retention configuration. Failed deletions retain their metadata and release their claims for retry. This removes files from the current data branch. The data repository's separate daily Action cleans their Git history afterward.
+
 ## Purge deleted files from Git history
 
 Deleting a file normally leaves its content in Git history. This repository includes a second cleanup stage under `target-repository/`:

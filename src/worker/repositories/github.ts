@@ -17,6 +17,27 @@ export class GithubApiError extends Error {
     }
 }
 
+export function repositoryFailure(error: unknown, env: Env, action: string) {
+    let detail = error instanceof Error ? error.message : 'Unknown synchronization error';
+    for (const secret of [env.GITHUB_PAT, env.ADMIN_PASSWORD, env.UPLOAD_PASSWORD]) {
+        if (secret) detail = detail.split(secret).join('[redacted]');
+    }
+    detail = detail.replace(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/g, '[redacted]').slice(0, 1500);
+    let hint = '';
+    if (error instanceof GithubApiError) {
+        if (error.status === 401) hint = 'Check whether GITHUB_PAT has expired or been revoked.';
+        else if (/rate limit/i.test(detail)) hint = 'GitHub rate limit reached; retry after the limit resets.';
+        else if (/workflow/i.test(detail)) hint = 'Writing workflow files requires Workflows: write for a fine-grained PAT, or the workflow scope for a classic PAT.';
+        else if (error.status === 404) hint = 'Check GITHUB_OWNER/GITHUB_REPO, token repository access, and that the default branch exists.';
+        else if (error.operation === 'Update default branch') hint = 'Check branch rules and Contents: write access.';
+        else if (error.status === 403) hint = 'Check token repository permissions and organization access restrictions.';
+    }
+    return {
+        error: `Could not ${action}. ${detail}${hint ? ` ${hint}` : ''}`,
+        ...(error instanceof GithubApiError ? { operation: error.operation, githubStatus: error.status, requestId: error.requestId } : {}),
+    };
+}
+
 async function githubApiError(response: Response, operation: string): Promise<GithubApiError> {
     const body = await response.text();
     let detail = body;

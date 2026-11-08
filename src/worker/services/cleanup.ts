@@ -1,11 +1,20 @@
 import type { Env } from '../types.ts';
 import { claimDeletion, releaseDeletion, recoverDeletionClaims } from '../repositories/management.ts';
 import { retentionMs } from '../config.ts';
-import { listCurrentImages, deleteImagesFromGithub } from '../repositories/github.ts';
+import { listCurrentImages, deleteImagesFromGithub, repositoryFailure } from '../repositories/github.ts';
 import { listAccessTimes, getAccessTime, initializeAccess, removeAccess, removeAccessBatch } from '../repositories/access.ts';
 const BATCH_SIZE = 100;
 
-export async function cleanupInactiveImages(env: Env, now: number): Promise<void> {
+export interface CleanupResult {
+    tracked: number;
+    initialized: number;
+    deleted: number;
+    failed: number;
+    failures: string[];
+    orphanedMetadataRemoved: number;
+}
+
+export async function cleanupInactiveImages(env: Env, now: number): Promise<CleanupResult> {
     await recoverDeletionClaims(env, now);
     const currentImages = await listCurrentImages(env);
     const accessTimes = await listAccessTimes(env);
@@ -23,6 +32,8 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
         .map(([imageId]) => imageId);
 
     let deletedCount = 0;
+    let failedCount = 0;
+    const failures: string[] = [];
     const claimedIds: string[] = [];
     for (const imageId of staleIds) {
         try {
@@ -37,7 +48,10 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
             claimedIds.push(imageId);
         } catch (error) {
             await releaseDeletion(env, imageId);
-            console.error('Scheduled image deletion failed:', imageId, error);
+            failedCount += 1;
+            const details = repositoryFailure(error, env, 'delete expired images');
+            failures.push(details.error);
+            console.error('Image deletion failed:', imageId, details);
         }
     }
 
@@ -57,7 +71,10 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
             if (!published) {
                 for (const imageId of claimedIds) await releaseDeletion(env, imageId);
             }
-            console.error('Scheduled batch image deletion failed:', error);
+            failedCount += claimedIds.length - deletedCount;
+            const details = repositoryFailure(error, env, 'delete expired images');
+            failures.push(details.error);
+            console.error('Batch image deletion failed:', details);
         }
     }
 
@@ -66,10 +83,14 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
         await removeAccessBatch(env, orphanedIds.slice(index, index + BATCH_SIZE), now);
     }
 
-    console.log('Image cleanup complete', {
+    const result: CleanupResult = {
         tracked: accessTimes.size + missingIds.length,
         initialized: missingIds.length,
         deleted: deletedCount,
+        failed: failedCount,
+        failures,
         orphanedMetadataRemoved: orphanedIds.length,
-    });
+    };
+    console.log('Image cleanup complete', result);
+    return result;
 }

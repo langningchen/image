@@ -5,12 +5,13 @@ import { getTrafficStats, listIpOverview } from '../repositories/traffic.ts';
 import { IMAGE_ID_PATTERN } from '../constants.ts';
 import { listImages, setLocked, getRetentionDistribution, type ImageFieldFilters } from '../repositories/management.ts';
 import { getFallback, setFallback, listAudit, moderationCounts, approveImage, claimRemoval, finishRemoval } from '../repositories/assessment.ts';
-import { deleteImageFromGithub } from '../repositories/github.ts';
+import { deleteImageFromGithub, repositoryFailure } from '../repositories/github.ts';
 import { assessImage } from '../services/moderation.ts';
 import { assessmentFailure } from '../repositories/assessment.ts';
 import { getUploadLimits, setUploadLimits } from '../repositories/upload-settings.ts';
 import type { UploadLimits } from '../../uploadLimits.ts';
-import { syncRepositoryConfig, repositoryConfigFailure } from '../services/repository-config.ts';
+import { syncRepositoryConfig } from '../services/repository-config.ts';
+import { cleanupInactiveImages } from '../services/cleanup.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -41,12 +42,22 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return json({ error: 'Forbidden' }, 403);
     try {
+        if (request.method === 'POST' && url.pathname === '/api/admin/cleanup') {
+            try {
+                const result = await cleanupInactiveImages(env, Date.now());
+                return json({ success: result.failed === 0, ...result });
+            } catch (error) {
+                const details = repositoryFailure(error, env, 'run image cleanup');
+                console.error('Manual image cleanup failed:', details);
+                return json(details, 502);
+            }
+        }
         if (request.method === 'POST' && url.pathname === '/api/admin/repository-config') {
             try {
                 const result = await syncRepositoryConfig(env);
                 return json({ ...result, repository: `${env.GITHUB_OWNER}/${env.GITHUB_REPO}` });
             } catch (error) {
-                const details = repositoryConfigFailure(error, env);
+                const details = repositoryFailure(error, env, 'sync repository configuration');
                 console.error('Repository configuration sync failed:', details);
                 return json(details, 502);
             }
