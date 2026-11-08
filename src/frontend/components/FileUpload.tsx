@@ -1,3 +1,4 @@
+import { uploadBatch } from '../uploadBatch';
 import React, { useState, useRef, useCallback } from 'react';
 import {
   Box,
@@ -66,6 +67,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadInFlight = useRef(false);
   const [dragOver, setDragOver] = useState(false);
 
   const uploadFile = useCallback(async (file: File): Promise<string> => {
@@ -108,8 +110,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
   }, [uploadPassword, uploadLimits.maxImageDimension, uploadLimits.maxUploadBytes]);
 
   const handleUpload = useCallback(async (files: FileList) => {
-    if (files.length === 0) return;
-
+    if (files.length === 0 || uploadInFlight.current) return;
+    uploadInFlight.current = true;
     setUploading(true);
     setError(null);
     setSuccess(null);
@@ -119,23 +121,22 @@ const FileUpload: React.FC<FileUploadProps> = ({ onImageUploaded }) => {
       const fileArray = Array.from(files);
       const totalFiles = fileArray.length;
 
-      // Upload files in parallel
-      const uploadPromises = fileArray.map(async (file, index) => {
-        const imageId = await uploadFile(file);
-        onImageUploaded(imageId);
-        setUploadProgress(((index + 1) / totalFiles) * 100);
-        return imageId;
-      });
+      const result = await uploadBatch(fileArray, uploadFile, onImageUploaded, setUploadProgress);
+      if (result.uploaded) {
+        setSuccess(`Successfully uploaded ${result.uploaded} of ${totalFiles} file(s)!`);
+        setTimeout(() => setSuccess(null), 3000);
+      }
+      if (result.errors.length) {
+        setError(`${result.errors.length} upload(s) failed. ${result.errors[0]}`);
+        setTimeout(() => setError(null), 5000);
+      }
 
-      await Promise.all(uploadPromises);
-
-      setSuccess(`Successfully uploaded ${totalFiles} file(s)!`);
-      setTimeout(() => setSuccess(null), 3000);
     } catch (error) {
       console.error('Upload error:', error);
       setError(error instanceof Error ? error.message : 'Upload failed. Please try again.');
       setTimeout(() => setError(null), 5000);
     } finally {
+      uploadInFlight.current = false;
       setUploading(false);
       setUploadProgress(0);
       if (fileInputRef.current) {
