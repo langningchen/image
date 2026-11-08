@@ -257,8 +257,8 @@ for (const failure of [false, true]) {
         assert.equal(result.initialized, untracked.length);
         assert.equal(result.orphanedMetadataRemoved, orphans.length);
         assert.equal(counts.database, 5);
-        assert.equal(counts.github, failure ? 20 : 8);
-        assert.equal(counts.total, failure ? 25 : 13);
+        assert.equal(counts.github, failure ? 22 : 8);
+        assert.equal(counts.total, failure ? 27 : 13);
         assert.equal(result.deleted, failure ? 0 : expired.length);
         assert.equal(result.failed, failure ? expired.length : 0);
         assert.equal(commits.length, failure ? 3 : 1);
@@ -487,6 +487,29 @@ test('repository sync exposes the exact GitHub failure stage and redacts secrets
         assert.ok(!result.error.includes(env.ADMIN_PASSWORD));
         assert.equal(updates.length, 0);
     }
+});
+
+test('repository writes do not rebuild commits for unchanged-head policy failures', async t => {
+    const { env, ctx } = fixture();
+    const { commits } = mockCleanupGithub(t, []);
+    const successfulFetch = globalThis.fetch;
+    let refusedUpdates = 0;
+    let refusedResponse: Response | undefined;
+    t.mock.method(console, 'error', () => {});
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        if (init?.method === 'PATCH') {
+            refusedUpdates++;
+            refusedResponse = Response.json({ message: 'Protected branch update failed' }, { status: 422 });
+            return refusedResponse;
+        }
+        return successfulFetch(url, init);
+    });
+    const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.equal(response.status, 502);
+    assert.equal(commits.length, 1);
+    assert.equal(refusedUpdates, 1);
+    assert.equal(refusedResponse?.bodyUsed, true);
+    assert.match((await response.json()).error, /Protected branch update failed/);
 });
 
 test('repository configuration sync stops before writing when the current tree is truncated', async t => {

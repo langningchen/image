@@ -194,9 +194,14 @@ export async function commitGithubChanges(
             body: JSON.stringify({ sha: commit.sha, force: false }),
         });
         if (updated.ok) return entries.length;
-        // Rebuild from the latest tree when another writer advances the branch.
-        if ((updated.status === 409 || updated.status === 422) && attempt < 2) continue;
-        throw await githubApiError(updated, 'Update default branch');
+        // Consume the failed response before further requests. A 422 can mean
+        // branch policy or workflow permissions; retry only if HEAD advanced.
+        const failure = await githubApiError(updated, 'Update default branch');
+        if ((updated.status === 409 || updated.status === 422) && attempt < 2) {
+            const latest = await request<{ object: { sha: string } }>(`/git/ref/heads/${branch}`, 'Check concurrent branch update');
+            if (latest.object?.sha && latest.object.sha !== ref.object.sha) continue;
+        }
+        throw failure;
     }
     throw new Error('Could not publish repository changes after retries');
 }
