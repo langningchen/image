@@ -16,7 +16,7 @@ A simple image hosting service built with React, Vite, Cloudflare Workers and D1
 
 Workers Static Assets serves matching static files directly. `/upload` always enters the Worker, and unmatched image URLs enter the Worker. The public uploader and `/admin/` each have a static HTML entry, so SPA fallback is disabled: missing images and unknown paths must return 404 rather than HTML. Existing `POST /upload`, `GET /<32 lowercase letters or digits>` and `?search` preview URLs are preserved.
 
-Access timestamps use monotonic SQL upserts: delayed requests cannot move the timestamp backward. Preview requests do not renew retention. Successful conditional (304) image requests renew retention. Cleanup initializes untracked GitHub images with the configured inactivity period of grace, rechecks access before deletion, serializes GitHub commits and removes orphaned metadata. GitHub and D1 do not share a transaction; an access during the GitHub deletion call can still race with cleanup. Image locks are enforced through atomic D1 deletion claims.
+Access timestamps use monotonic SQL upserts: delayed requests cannot move the timestamp backward. Preview requests do not renew retention. Successful conditional (304) image requests renew retention. Cleanup initializes untracked GitHub images with the configured inactivity period of grace, rechecks access before deletion, batches eligible deletions into one GitHub commit and removes orphaned metadata. GitHub and D1 do not share a transaction; an access during the GitHub deletion call can still race with cleanup. Image locks are enforced through atomic D1 deletion claims.
 
 Browser and service-worker image caches retain the existing long-lived caching behavior. Only requests reaching the Worker renew retention; cache hits do not. Removing an image on the server does not invalidate existing browser copies.
 
@@ -69,14 +69,14 @@ On 2026-10-07, all four fixtures returned the expected verdict through both the 
 
 Image deletion cannot invalidate copies in browsers/service-worker caches or Git history. Historical uploads that failed before this migration have no stored bytes or assessment audit and cannot be reconstructed for preview.
 
-The overview also includes an interactive doughnut chart of all tracked images by cleanup eligibility: ready now, individual days 1–6, groups of 7–14, 15–21, 22–30 days, more than 30 days, locked, and deleting. Individual image cards show their remaining retention time. These estimates describe when an image becomes eligible; the daily job performs the actual deletion. Renewed access and locking can change the distribution.
+The overview also includes an interactive doughnut chart of all tracked images by cleanup eligibility: ready now, individual days 1–6, groups of 7–14, 15–21, 22–30 days, more than 30 days, locked, and deleting. Individual image cards show their remaining retention time. These estimates describe when an image becomes eligible; the daily job or the manual cleanup button performs the actual deletion. Renewed access and locking can change the distribution.
 
 IP location previews use [Cloudflare request metadata](https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties): country, region, city, ASN and network organization. The latest known location is saved with the existing daily traffic update, without a separate geolocation API call or an additional write per request. Location is approximate and is unavailable for historical records until a new request supplies metadata. IP management counts span retained activity (up to 90 days); ranking counts follow the selected 7/30/90-day range. Counters include failed upload attempts and do not impose a frequency limit.
 
 ## Setup and deployment
 
 1. Install dependencies with `pnpm install`.
-2. Create a dedicated private GitHub image repository and a PAT with repository contents read/write access.
+2. Create a dedicated private GitHub data repository and initialize it with a README so its default branch exists. Create a fine-grained PAT with access to that repository and **Contents: Read and write** plus **Workflows: Read and write** permissions. For a classic PAT, use the `repo` and `workflow` scopes. Authenticate with `pnpm exec wrangler login` before setting secrets or deploying.
 3. Set the repository credentials and administrator password:
 
    ```sh
@@ -94,6 +94,10 @@ IP location previews use [Cloudflare request metadata](https://developers.cloudf
    pnpm test
    pnpm deploy
    ```
+
+6. In `/admin/` → **Settings → Daily history cleanup**, click **Sync to data repository** to install the workflow and script in the configured data repository. Enable Actions, allow workflow read/write permissions and permit the cleanup workflow to force-push on its default branch, then use **Actions → Purge deleted image history → Run workflow** to verify it. See [history cleanup setup](#purge-deleted-files-from-git-history) for details. Re-sync after application upgrades to install updated templates.
+
+The Worker deletes inactive images during its daily cleanup; **Overview / Image library → Clean up expired images** runs it immediately. The data repository's separate Action runs at **00:00 UTC (08:00 China time)** to purge the Git history of images already deleted from the current branch.
 
 `wrangler.jsonc` intentionally omits `database_id`. Wrangler supports [automatic resource provisioning](https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/): local development works without an ID, and direct deployment can associate or create the named database. Never use an empty string or an all-zero UUID as a placeholder.
 
@@ -118,7 +122,7 @@ pnpm start
 
 Image IDs accept exactly 32 characters from `a-z` and `0-9`, including legacy IDs containing digits. Upload response validation, image routes, traffic recording, admin review/lock routes and cursors, service-worker caching, the Vite proxy, KV import and history cleanup use this format. The current generator still produces letters only; those IDs remain valid.
 
-Apply `migrations/0006_alphanumeric_image_ids.sql` before using numeric IDs in D1. It rebuilds the old letter-only CHECK constraint while preserving all image records, access times, locks, deletion claims and moderation evidence, and recreates the indexes. `pnpm deploy` applies it automatically. Historical migration `0001` intentionally retains its original schema. If the purge-history script is installed in a separate image repository, copy the updated script there as well.
+Apply `migrations/0006_alphanumeric_image_ids.sql` before using numeric IDs in D1. It rebuilds the old letter-only CHECK constraint while preserving all image records, access times, locks, deletion claims and moderation evidence, and recreates the indexes. `pnpm deploy` applies it automatically. Historical migration `0001` intentionally retains its original schema. If the purge-history script is installed in a separate image repository, use **Settings → Daily history cleanup → Sync to data repository** to update it, or copy the script manually.
 
 ## Migrating existing KV access times
 
@@ -164,7 +168,7 @@ If copying manually, commit and push the files in the target repository. After e
 
 1. Open the target repository's **Settings → Actions → General** and set **Workflow permissions** to **Read and write permissions**.
 2. Ensure the default branch permits this workflow to force-push. Branch protection or rulesets that reject force-pushes must be adjusted for this dedicated repository.
-3. Keep the target repository dedicated to image storage, with one active branch and no tags that retain old image objects. The supplied workflow rewrites and pushes only the branch on which it runs.
+3. Keep the target repository dedicated to image storage, with one active branch and no tags that retain old image objects. The supplied workflow always checks out, rewrites and pushes the default branch, including manual runs.
 4. Run **Purge deleted image history → Run workflow** once to verify the setup.
 
 The push uses `--force-with-lease`. If an upload changes the target branch while cleanup is running, the push fails safely instead of overwriting that upload; the next daily run can retry. History rewrites change commit IDs and invalidate old clones, so do not install this workflow in a general-purpose source repository. GitHub may also take time to compact unreachable server-side objects, so displayed repository size may not fall immediately.

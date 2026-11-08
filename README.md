@@ -14,7 +14,9 @@ Built with React, Cloudflare Workers and D1. Images are stored in a dedicated pr
 
 ## Quick Start
 
-Requires Node.js 22.15+ and pnpm. Create a private GitHub image repository and a PAT with contents read/write access, then authenticate Wrangler with your Cloudflare account.
+Requires Node.js 22.15+ and pnpm. Create a dedicated private GitHub data repository and initialize it with a README so its default branch exists. Create a fine-grained PAT with access to that repository and **Contents: Read and write** plus **Workflows: Read and write** permissions. For a classic PAT, use the `repo` and `workflow` scopes.
+
+Configure a custom domain/route in `wrangler.jsonc`, or enable `workers_dev` before deployment. Then authenticate Wrangler, set the data repository credentials and administrator password, and deploy:
 
 ```sh
 pnpm install
@@ -26,7 +28,14 @@ pnpm wrangler:remote secret put ADMIN_PASSWORD
 pnpm deploy
 ```
 
-Configure a custom domain/route in `wrangler.jsonc`, or enable `workers_dev` before deployment. Deployment creates or reuses D1 and applies migrations automatically. With AI enabled, complete model license activation in `/admin/` → **Model setup** before accepting uploads.
+Deployment creates or reuses D1 and applies migrations automatically. After deployment:
+
+1. Open `/admin/`, sign in with `ADMIN_PASSWORD`, and go to **Settings → Daily history cleanup → Sync to data repository**. This installs or updates the Actions workflow and cleanup script together; no manual file copying is needed. Re-sync after upgrading the application to apply updated templates.
+2. In the data repository, enable GitHub Actions, allow workflow read/write permissions, and ensure the default branch permits the cleanup workflow to force-push. See the [history cleanup setup](docs/guide.md#purge-deleted-files-from-git-history) for details.
+3. Open the data repository's **Actions → Purge deleted image history → Run workflow** to verify it. The workflow then runs daily at **00:00 UTC (08:00 China time)** and purges Git history for images already deleted from the current branch.
+4. With AI enabled, complete **Settings → Connect image assessment** in `/admin/` before accepting uploads.
+
+Inactive images are removed by the Worker's daily cleanup according to `IMAGE_RETENTION_DAYS`. To run it immediately, use **Overview / Image library → Clean up expired images**. The data repository's Action handles Git history cleanup separately.
 
 ## Configuration
 
@@ -36,7 +45,7 @@ Use Worker secrets for credentials and the Cloudflare dashboard or `wrangler.jso
 | --- | --- | --- |
 | `GITHUB_OWNER` | required | Image repository owner. |
 | `GITHUB_REPO` | required | Image repository name. |
-| `GITHUB_PAT` | required | GitHub token with contents read/write access. |
+| `GITHUB_PAT` | required | GitHub token with contents read/write access and workflow write access for syncing data repository configuration. |
 | `ADMIN_PASSWORD` | unset | Administration password; unset disables administration. |
 | `UPLOAD_PASSWORD` | unset | Optional password required for all uploads. |
 | `IMAGE_RETENTION_DAYS` | `7` | Inactivity period in days; positive, at most 3650. |
