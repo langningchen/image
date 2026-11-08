@@ -67,6 +67,17 @@ export async function saveModeration(env: Env, imageId: string, status: ManagedI
     ).bind(status, reason, now, imageId).run();
 }
 
+export async function saveUploadedImage(env: Env, imageId: string, ip: string, reason: string, now = Date.now()): Promise<void> {
+    await env.DB.prepare(`INSERT INTO image_access
+        (image_id, last_accessed_at, moderation_status, moderation_reason, moderated_at, uploader_ip, uploaded_at)
+        VALUES (?, ?, 'approved', ?, ?, ?, ?)
+        ON CONFLICT(image_id) DO UPDATE SET
+            last_accessed_at = MAX(image_access.last_accessed_at, excluded.last_accessed_at),
+            moderation_status = excluded.moderation_status, moderation_reason = excluded.moderation_reason,
+            moderated_at = excluded.moderated_at, uploader_ip = excluded.uploader_ip, uploaded_at = excluded.uploaded_at`)
+        .bind(imageId, now, reason, now, ip, now).run();
+}
+
 export async function claimDeletion(env: Env, imageId: string, cutoff: number): Promise<boolean> {
     const row = await env.DB.prepare(
         'UPDATE image_access SET deleting = 1, deletion_started_at = ? WHERE image_id = ? AND locked = 0 AND deleting = 0 AND last_accessed_at <= ? RETURNING image_id',

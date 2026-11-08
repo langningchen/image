@@ -5,7 +5,7 @@ import { IMAGE_ID_PATTERN, corsHeaders } from '../constants.ts';
 import { githubApiUrl, githubHeaders, type GithubContentResponse } from '../repositories/github.ts';
 import { moderateImage } from '../services/moderation.ts';
 import { clientIp, getIpControl, recordViolation, WARNING_THRESHOLD } from '../repositories/ip-controls.ts';
-import { saveModeration } from '../repositories/management.ts';
+import { saveUploadedImage } from '../repositories/management.ts';
 import { recordAccess } from '../repositories/access.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../../terms.ts';
 import { assessmentFailure, getFallback, recordFallback, finishFallback, type FailureDetails } from '../repositories/assessment.ts';
@@ -158,10 +158,7 @@ export async function handleUpload(request: Request, env: Env, metrics = { bytes
 
         try {
             if (!assessmentError) {
-                await recordAccess(env, imageId);
-                await saveModeration(env, imageId, 'approved', verdict.reason);
-                await env.DB.prepare('UPDATE image_access SET uploader_ip = ?, uploaded_at = ? WHERE image_id = ?')
-                    .bind(ip, Date.now(), imageId).run();
+                await saveUploadedImage(env, imageId, ip, verdict.reason);
             }
             await finishAudit(true);
         } catch (error) {

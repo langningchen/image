@@ -8,7 +8,7 @@ import worker from '../src/worker/index.ts';
 import { recordAccess, initializeAccess, getAccessTime, listAccessTimes } from '../src/worker/repositories/access.ts';
 import { cleanupInactiveImages } from '../src/worker/services/cleanup.ts';
 import { recordViolation, getIpControl, updateIpControl, normalizeIp, VIOLATION_WINDOW_MS } from '../src/worker/repositories/ip-controls.ts';
-import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution, listImages } from '../src/worker/repositories/management.ts';
+import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution, listImages, saveUploadedImage } from '../src/worker/repositories/management.ts';
 import { getTrafficStats, recordTraffic, pruneActivity, listIpOverview, requestLocation } from '../src/worker/repositories/traffic.ts';
 import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
@@ -81,7 +81,7 @@ function mockCleanupGithub(t: TestContext, paths: string[], options: { fail?: bo
     return { trees, commits, updates };
 }
 
-function enforceCleanupRequestBudget(t: TestContext, env: ReturnType<typeof fixture>['env'], limit = 50) {
+function enforceWorkerRequestBudget(t: TestContext, env: ReturnType<typeof fixture>['env'], limit = 50) {
     const counts = { database: 0, github: 0, total: 0 };
     let batchDepth = 0;
     function spend(kind: 'database' | 'github') {
@@ -171,6 +171,38 @@ test('upload initializes D1, previews do not renew and conditional views do rene
     assert.ok((await getAccessTime(env, id)) > 1);
 });
 
+test('successful uploads persist complete metadata in one write', async t => {
+    const { env, ctx, pending, sqlite } = fixture();
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        assert.equal(init?.method, 'PUT');
+        return Response.json({ content: { name: new URL(url).pathname.split('/').at(-1) } });
+    });
+    const counts = enforceWorkerRequestBudget(t, env);
+    const response = await worker.fetch(uploadRequest(), env, ctx);
+    const imageId = await response.text();
+    await Promise.all(pending);
+    assert.equal(response.status, 200);
+    assert.equal(counts.database, 5); // policy, limits, ban recheck, metadata, traffic
+    assert.equal(counts.github, 1);
+    const row = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(imageId)!;
+    assert.equal(row.moderation_status, 'approved');
+    assert.equal(row.moderation_reason, 'safe');
+    assert.equal(row.uploader_ip, '203.0.113.1');
+    assert.equal(row.last_accessed_at, row.uploaded_at);
+    assert.equal(row.moderated_at, row.uploaded_at);
+});
+
+test('upload metadata upserts preserve newer access and existing retention controls', async () => {
+    const { env, sqlite } = fixture();
+    await recordAccess(env, id, 500);
+    await setLocked(env, id, true);
+    await saveUploadedImage(env, id, '203.0.113.1', 'safe', 100);
+    const row = sqlite.prepare('SELECT * FROM image_access WHERE image_id = ?').get(id)!;
+    assert.equal(row.last_accessed_at, 500);
+    assert.equal(row.locked, 1);
+    assert.equal(row.moderation_status, 'approved');
+});
+
 test('conditional requests return 404 when image was deleted', async t => {
     const { env, ctx } = fixture();
     t.mock.method(globalThis, 'fetch', async url => new Response(null, { status: String(url).includes('/contents/') ? 404 : 200 }));
@@ -252,7 +284,7 @@ for (const failure of [false, true]) {
         sqlite.exec('COMMIT');
         const paths = ids.slice(0, 16200).map(image => `${image}.png`);
         const { commits } = mockCleanupGithub(t, paths, { fail: failure });
-        const counts = enforceCleanupRequestBudget(t, env);
+        const counts = enforceWorkerRequestBudget(t, env);
         const result = await cleanupInactiveImages(env, now);
         assert.equal(result.initialized, untracked.length);
         assert.equal(result.orphanedMetadataRemoved, orphans.length);
