@@ -24,8 +24,9 @@ export interface ImageFieldFilters {
 }
 
 export async function listImages(env: Env, cursor: string, status = '', retention = '', source = '', search = '', fields: ImageFieldFilters = {}): Promise<ManagedImage[]> {
-    const conditions = ['image_id > ?', "(? = '' OR moderation_status = ?)"];
-    const args: (string | number)[] = [cursor, status, status];
+    const conditions = ['image_id > ?'];
+    const args: (string | number)[] = [cursor];
+    if (status) { conditions.push('moderation_status = ?'); args.push(status); }
     const cutoff = Date.now() - retentionMs(env);
     if (retention === 'locked') conditions.push('locked = 1');
     if (retention === 'unlocked') conditions.push('locked = 0 AND deleting = 0');

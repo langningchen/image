@@ -1335,6 +1335,26 @@ test('environment retention and AI configuration affect public configuration and
     await assert.rejects(() => getFallback({ ...env, AI_MODERATION_FALLBACK: 'invalid' }));
 });
 
+test('review status pagination uses the existing status index', async t => {
+    const { env, sqlite } = fixture();
+    await recordAccess(env, id, 1);
+    await recordAccess(env, second, 1);
+    sqlite.prepare("UPDATE image_access SET moderation_status = 'error' WHERE image_id = ?").run(second);
+    let plan: string[] = [];
+    const prepare = env.DB.prepare;
+    t.mock.method(env.DB, 'prepare', (sql, args = []) => {
+        const statement = prepare(sql, args);
+        const bind = statement.bind;
+        statement.bind = (...values) => {
+            if (sql.startsWith('SELECT * FROM image_access WHERE')) plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(row => String(row.detail));
+            return bind(...values);
+        };
+        return statement;
+    });
+    assert.deepEqual((await listImages(env, id, 'error')).map(row => row.image_id), [second]);
+    assert.ok(plan.some(line => /SEARCH image_access USING INDEX idx_image_moderation_status/.test(line)));
+});
+
 test('admin image filters combine retention, approval source and search before pagination', async () => {
     const { env, ctx, sqlite } = fixture();
     await recordAccess(env, id, Date.now());
