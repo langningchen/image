@@ -8,11 +8,11 @@ import worker from '../src/worker/index.ts';
 import { recordAccess, initializeAccess, getAccessTime, listAccessTimes } from '../src/worker/repositories/access.ts';
 import { cleanupInactiveImages } from '../src/worker/services/cleanup.ts';
 import { recordViolation, getIpControl, updateIpControl, normalizeIp, VIOLATION_WINDOW_MS } from '../src/worker/repositories/ip-controls.ts';
-import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution, listImages, saveUploadedImage } from '../src/worker/repositories/management.ts';
+import { setLocked, claimDeletion, releaseDeletion, getRetentionDistribution, listImages, saveUploadedImage, recoverDeletionClaims } from '../src/worker/repositories/management.ts';
 import { getTrafficStats, recordTraffic, pruneActivity, listIpOverview, requestLocation } from '../src/worker/repositories/traffic.ts';
 import { RETENTION_MS } from '../src/worker/constants.ts';
 import { CONSENT_HEADER, TERMS_VERSION } from '../src/terms.ts';
-import { setFallback, getFallback } from '../src/worker/repositories/assessment.ts';
+import { setFallback, getFallback, claimRemoval, finishRemoval } from '../src/worker/repositories/assessment.ts';
 import { parseVerdict, AssessmentError, moderateImage } from '../src/worker/services/moderation.ts';
 import { getUploadLimits, setUploadLimits } from '../src/worker/repositories/upload-settings.ts';
 import { DEFAULT_UPLOAD_LIMITS } from '../src/uploadLimits.ts';
@@ -32,6 +32,7 @@ function fixture(alphanumericIds = true) {
     if (alphanumericIds) sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0007_upload_limits.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0008_traffic_ip_index.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/0009_pending_deletion_indexes.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
@@ -1333,6 +1334,34 @@ test('environment retention and AI configuration affect public configuration and
     assert.equal(stats.buckets[0].bucket, '22-30');
     assert.equal(stats.buckets[0].count, 1);
     await assert.rejects(() => getFallback({ ...env, AI_MODERATION_FALLBACK: 'invalid' }));
+});
+
+test('pending deletion recovery and review completion use partial indexes', async t => {
+    const { env, sqlite } = fixture();
+    await recordAccess(env, id, 1);
+    await recordAccess(env, second, 1);
+    await claimDeletion(env, id, Date.now());
+    await claimDeletion(env, second, Date.now());
+    sqlite.prepare('UPDATE image_access SET deletion_started_at = ? WHERE image_id = ?').run(Date.now() - 2 * 3600000, id);
+    const plans: string[] = [];
+    const prepare = env.DB.prepare;
+    t.mock.method(env.DB, 'prepare', (sql, args = []) => {
+        const statement = prepare(sql, args);
+        const bind = statement.bind;
+        statement.bind = (...values) => {
+            if (sql.startsWith('UPDATE')) plans.push(...sqlite.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(row => String(row.detail)));
+            return bind(...values);
+        };
+        return statement;
+    });
+    await recoverDeletionClaims(env, Date.now());
+    assert.equal(sqlite.prepare('SELECT deleting FROM image_access WHERE image_id = ?').get(id)?.deleting, 0);
+    assert.equal(sqlite.prepare('SELECT deleting FROM image_access WHERE image_id = ?').get(second)?.deleting, 1);
+    assert.equal(await claimRemoval(env, id), true);
+    await finishRemoval(env, id, false);
+    assert.ok(plans.some(line => line.includes('USING INDEX idx_image_pending_deletions')));
+    assert.ok(plans.some(line => line.includes('USING INDEX idx_audit_pending_removal')));
+    assert.equal(sqlite.prepare('SELECT outcome FROM assessment_audit WHERE image_id = ?').get(id)?.outcome, 'storage_failed');
 });
 
 test('review status pagination uses the existing status index', async t => {
