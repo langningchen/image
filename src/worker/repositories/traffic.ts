@@ -47,8 +47,12 @@ function locationsFor(selection: 'page' | 'ranked_ips'): string {
 
 export async function listIpOverview(env: Env, cursor: string) {
     const today = new Date().toISOString().slice(0, 10);
-    const { results } = await env.DB.prepare(`WITH known_ips AS (
-        SELECT ip FROM ip_controls WHERE ip > ? UNION SELECT ip FROM traffic_daily WHERE ip > ?
+    const { results } = await env.DB.prepare(`WITH control_ips AS (
+        SELECT ip FROM ip_controls WHERE ip > ? ORDER BY ip LIMIT 101
+    ), traffic_ips AS (
+        SELECT DISTINCT ip FROM traffic_daily WHERE ip > ? ORDER BY ip LIMIT 101
+    ), known_ips AS (
+        SELECT ip FROM control_ips UNION SELECT ip FROM traffic_ips
     ), page AS MATERIALIZED (
         SELECT ip FROM known_ips ORDER BY ip LIMIT 101
     ), uploads AS (
