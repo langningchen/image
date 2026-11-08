@@ -30,31 +30,39 @@ export async function recordTraffic(env: Env, ip: string, direction: 'upload' | 
             location?.asn ?? null, location?.organization ?? null, now).run();
 }
 
-const IP_ROLLUP = `WITH locations AS (
-    SELECT ip, country, region, city, asn, organization,
-        ROW_NUMBER() OVER (PARTITION BY ip ORDER BY observed_at DESC, day DESC, direction) AS position
-    FROM traffic_daily WHERE country IS NOT NULL OR region IS NOT NULL OR city IS NOT NULL OR asn IS NOT NULL OR organization IS NOT NULL
-), uploads AS (
-    SELECT ip, SUM(requests) AS requests, SUM(bytes) AS bytes, SUM(failed_requests) AS failed_requests,
-        SUM(CASE WHEN direction = 'upload' THEN requests ELSE 0 END) AS upload_requests,
-        SUM(CASE WHEN direction = 'upload' THEN requests - failed_requests ELSE 0 END) AS successful_uploads,
-        SUM(CASE WHEN direction = 'upload' THEN failed_requests ELSE 0 END) AS failed_uploads,
-        SUM(CASE WHEN direction = 'upload' AND day = ? THEN requests ELSE 0 END) AS uploads_today
-    FROM traffic_daily WHERE day >= ? GROUP BY ip
-)`;
+const IP_AGGREGATES = `SUM(t.requests) AS requests, SUM(t.bytes) AS bytes, SUM(t.failed_requests) AS failed_requests,
+    SUM(CASE WHEN t.direction = 'upload' THEN t.requests ELSE 0 END) AS upload_requests,
+    SUM(CASE WHEN t.direction = 'upload' THEN t.requests - t.failed_requests ELSE 0 END) AS successful_uploads,
+    SUM(CASE WHEN t.direction = 'upload' THEN t.failed_requests ELSE 0 END) AS failed_uploads,
+    SUM(CASE WHEN t.direction = 'upload' AND t.day = ? THEN t.requests ELSE 0 END) AS uploads_today`;
+
+function locationsFor(selection: 'page' | 'ranked_ips'): string {
+    return `locations AS (
+        SELECT t.ip, t.country, t.region, t.city, t.asn, t.organization,
+            ROW_NUMBER() OVER (PARTITION BY t.ip ORDER BY t.observed_at DESC, t.day DESC, t.direction) AS position
+        FROM ${selection} s CROSS JOIN traffic_daily t ON t.ip = s.ip
+        WHERE t.country IS NOT NULL OR t.region IS NOT NULL OR t.city IS NOT NULL OR t.asn IS NOT NULL OR t.organization IS NOT NULL
+    )`;
+}
 
 export async function listIpOverview(env: Env, cursor: string) {
     const today = new Date().toISOString().slice(0, 10);
-    const { results } = await env.DB.prepare(`${IP_ROLLUP}, known_ips AS (
-        SELECT ip FROM ip_controls UNION SELECT ip FROM uploads
-    ) SELECT k.ip, COALESCE(c.exempt, 0) AS exempt, COALESCE(c.violations, 0) AS violations,
+    const { results } = await env.DB.prepare(`WITH known_ips AS (
+        SELECT ip FROM ip_controls WHERE ip > ? UNION SELECT ip FROM traffic_daily WHERE ip > ?
+    ), page AS MATERIALIZED (
+        SELECT ip FROM known_ips ORDER BY ip LIMIT 101
+    ), uploads AS (
+        SELECT t.ip, ${IP_AGGREGATES}
+        FROM page p CROSS JOIN traffic_daily t ON t.ip = p.ip GROUP BY t.ip
+    ), ${locationsFor('page')}
+    SELECT k.ip, COALESCE(c.exempt, 0) AS exempt, COALESCE(c.violations, 0) AS violations,
         COALESCE(c.window_started_at, 0) AS window_started_at, COALESCE(c.banned_until, 0) AS banned_until,
         COALESCE(u.upload_requests, 0) AS upload_requests, COALESCE(u.successful_uploads, 0) AS successful_uploads,
         COALESCE(u.failed_uploads, 0) AS failed_uploads, COALESCE(u.uploads_today, 0) AS uploads_today,
         l.country, l.region, l.city, l.asn, l.organization
-        FROM known_ips k LEFT JOIN ip_controls c ON c.ip = k.ip LEFT JOIN uploads u ON u.ip = k.ip
+        FROM page k LEFT JOIN ip_controls c ON c.ip = k.ip LEFT JOIN uploads u ON u.ip = k.ip
         LEFT JOIN locations l ON l.ip = k.ip AND l.position = 1
-        WHERE k.ip > ? ORDER BY k.ip LIMIT 101`).bind(today, '', cursor).all<{ ip: string }>();
+        ORDER BY k.ip`).bind(cursor, cursor, today).all<{ ip: string }>();
     return results;
 }
 
@@ -96,19 +104,24 @@ export function trackResponse(request: Request, response: Response, env: Env, ct
 export async function getTrafficStats(env: Env, days: number, now = Date.now(), order: 'traffic' | 'uploads' = 'traffic') {
     const since = new Date(now - (days - 1) * 86400000).toISOString().slice(0, 10);
     const today = new Date(now).toISOString().slice(0, 10);
-    const [daily, ips, totals] = await Promise.all([
+    const [daily, ips, totals] = await env.DB.batch([
         env.DB.prepare(`SELECT day, direction, SUM(requests) AS requests, SUM(bytes) AS bytes,
             SUM(failed_requests) AS failed_requests, COUNT(DISTINCT ip) AS ips
-            FROM traffic_daily WHERE day >= ? GROUP BY day, direction ORDER BY day`).bind(since).all(),
-        env.DB.prepare(`${IP_ROLLUP} SELECT u.*, l.country, l.region, l.city, l.asn, l.organization
-            FROM uploads u LEFT JOIN locations l ON l.ip = u.ip AND l.position = 1
-            ORDER BY ${order === 'uploads' ? 'u.upload_requests' : 'u.bytes'} DESC, u.ip LIMIT 20`).bind(today, since).all(),
+            FROM traffic_daily WHERE day >= ? GROUP BY day, direction ORDER BY day`).bind(since),
+        env.DB.prepare(`WITH uploads AS (
+            SELECT t.ip, ${IP_AGGREGATES} FROM traffic_daily t WHERE t.day >= ? GROUP BY t.ip
+        ), ranked_ips AS MATERIALIZED (
+            SELECT * FROM uploads ORDER BY ${order === 'uploads' ? 'upload_requests' : 'bytes'} DESC, ip LIMIT 20
+        ), ${locationsFor('ranked_ips')}
+        SELECT u.*, l.country, l.region, l.city, l.asn, l.organization
+            FROM ranked_ips u LEFT JOIN locations l ON l.ip = u.ip AND l.position = 1
+            ORDER BY ${order === 'uploads' ? 'u.upload_requests' : 'u.bytes'} DESC, u.ip`).bind(today, since),
         env.DB.prepare(`SELECT COUNT(DISTINCT ip) AS ips, COALESCE(SUM(requests), 0) AS requests,
             COALESCE(SUM(bytes), 0) AS bytes,
             COALESCE(SUM(CASE WHEN direction = 'upload' THEN requests ELSE 0 END), 0) AS upload_requests
-            FROM traffic_daily WHERE day >= ?`).bind(since).first(),
+            FROM traffic_daily WHERE day >= ?`).bind(since),
     ]);
-    return { daily: daily.results, ips: ips.results, totals, since };
+    return { daily: daily.results, ips: ips.results, totals: totals.results[0], since };
 }
 
 export async function pruneActivity(env: Env, now: number): Promise<void> {

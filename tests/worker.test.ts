@@ -31,10 +31,12 @@ function fixture(alphanumericIds = true) {
     sqlite.exec(readFileSync(new URL('../migrations/0005_moderation_fallback.sql', import.meta.url), 'utf8'));
     if (alphanumericIds) sqlite.exec(readFileSync(new URL('../migrations/0006_alphanumeric_image_ids.sql', import.meta.url), 'utf8'));
     sqlite.exec(readFileSync(new URL('../migrations/0007_upload_limits.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/0008_traffic_ip_index.sql', import.meta.url), 'utf8'));
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
             run: async () => {
+                if (/^\s*(SELECT|WITH)/i.test(sql)) return { results: sqlite.prepare(sql).all(...args), meta: { changes: 0 } };
                 if (sql.includes('RETURNING')) {
                     const results = sqlite.prepare(sql).all(...args);
                     return { results, meta: { changes: results.length } };
@@ -754,6 +756,52 @@ test('IP overview reports geolocation and upload outcomes with traffic and uploa
     const response = await worker.fetch(adminRequest('/stats?days=7&sort=uploads'), env, ctx);
     assert.equal((await response.json()).ips[0].ip, ip);
     assert.equal((await worker.fetch(adminRequest('/stats?sort=invalid'), env, ctx)).status, 400);
+});
+
+test('traffic analytics uses one D1 batch and indexed lookups for paged and ranked locations', async t => {
+    const { env, sqlite } = fixture();
+    const now = Date.now();
+    const ips = Array.from({ length: 160 }, (_, index) => `10.0.0.${index}`);
+    const insert = sqlite.prepare(`INSERT INTO traffic_daily
+        (day, ip, direction, requests, bytes, country, observed_at) VALUES (?, ?, ?, 1, ?, ?, ?)`);
+    sqlite.exec('BEGIN');
+    for (const [index, ip] of ips.entries()) {
+        insert.run(new Date(now - 60 * 86400000).toISOString().slice(0, 10), ip, 'download', 1, 'DE', now - 60 * 86400000);
+        for (let day = 0; day < 14; day++) {
+            insert.run(new Date(now - day * 86400000).toISOString().slice(0, 10), ip, day % 2 ? 'upload' : 'download', (index + 1) * 10, null, now - day * 86400000);
+        }
+    }
+    sqlite.exec('COMMIT');
+    await updateIpControl(env, '10.0.1.1', 'exempt'); // A control-only IP still appears.
+    const plans: string[][] = [];
+    const prepare = env.DB.prepare;
+    t.mock.method(env.DB, 'prepare', (sql, args = []) => {
+        const statement = prepare(sql, args);
+        const bind = statement.bind;
+        statement.bind = (...values) => {
+            if (sql.includes('locations AS')) {
+                plans.push(sqlite.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(row => String(row.detail)));
+            }
+            return bind(...values);
+        };
+        return statement;
+    });
+    const counts = enforceWorkerRequestBudget(t, env);
+    const stats = await getTrafficStats(env, 14, now);
+    assert.equal(counts.database, 1);
+    assert.equal(stats.ips.length, 20);
+    assert.equal(stats.ips[0].ip, ips.at(-1));
+    assert.equal(stats.ips[0].country, 'DE'); // Location can predate the selected range.
+    assert.equal(stats.totals.ips, 160);
+    assert.equal(stats.totals.requests, 160 * 14);
+    const first = await listIpOverview(env, '');
+    const secondPage = await listIpOverview(env, first[99].ip);
+    const combined = [...first.slice(0, 100), ...secondPage];
+    assert.deepEqual(combined.map(row => row.ip), [...ips, '10.0.1.1'].sort());
+    assert.equal(new Set(combined.map(row => row.ip)).size, 161);
+    assert.equal(counts.database, 3);
+    assert.equal(plans.length, 3);
+    assert.ok(plans.every(plan => plan.some(line => /SEARCH t USING INDEX idx_traffic_daily_ip_observed \(ip=\?\)/.test(line))));
 });
 
 test('geolocation comes from Cloudflare metadata and not arbitrary request headers', () => {
