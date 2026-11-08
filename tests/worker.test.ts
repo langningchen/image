@@ -34,7 +34,14 @@ function fixture(alphanumericIds = true) {
     function prepare(sql: string, args: unknown[] = []) {
         return {
             bind: (...values: unknown[]) => prepare(sql, values),
-            run: async () => ({ results: sql.includes('RETURNING') ? sqlite.prepare(sql).all(...args) : (sqlite.prepare(sql).run(...args), []) }),
+            run: async () => {
+                if (sql.includes('RETURNING')) {
+                    const results = sqlite.prepare(sql).all(...args);
+                    return { results, meta: { changes: results.length } };
+                }
+                const result = sqlite.prepare(sql).run(...args);
+                return { results: [], meta: { changes: Number(result.changes) } };
+            },
             first: async () => sqlite.prepare(sql).get(...args) ?? null,
             all: async () => ({ results: sqlite.prepare(sql).all(...args) }),
         };
@@ -72,6 +79,46 @@ function mockCleanupGithub(t: TestContext, paths: string[], options: { fail?: bo
         throw new Error(`Unexpected GitHub request: ${init?.method ?? 'GET'} ${path}`);
     });
     return { trees, commits, updates };
+}
+
+function enforceCleanupRequestBudget(t: TestContext, env: ReturnType<typeof fixture>['env'], limit = 50) {
+    const counts = { database: 0, github: 0, total: 0 };
+    let batchDepth = 0;
+    function spend(kind: 'database' | 'github') {
+        counts[kind]++;
+        counts.total++;
+        if (counts.total > limit) throw new Error('Too many API requests by single Worker invocation');
+    }
+    function wrap(statement: any): any {
+        return {
+            bind: (...values: unknown[]) => {
+                assert.ok(values.length <= 100, 'D1 allows at most 100 bound parameters per statement');
+                for (const value of values) {
+                    if (typeof value === 'string') assert.ok(Buffer.byteLength(value) <= 2000000, 'D1 string size limit');
+                }
+                return wrap(statement.bind(...values));
+            },
+            ...Object.fromEntries(['run', 'first', 'all'].map(method => [method, async (...args: unknown[]) => {
+                if (!batchDepth) spend('database');
+                return statement[method](...args);
+            }])),
+        };
+    }
+    const prepare = env.DB.prepare;
+    const batch = env.DB.batch;
+    const githubFetch = globalThis.fetch;
+    t.mock.method(env.DB, 'prepare', (sql: string) => wrap(prepare(sql)));
+    t.mock.method(env.DB, 'batch', async (statements: any[]) => {
+        spend('database');
+        batchDepth++;
+        try { return await batch(statements); }
+        finally { batchDepth--; }
+    });
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        spend('github');
+        return githubFetch(url, init);
+    });
+    return counts;
 }
 
 test('D1 upserts and reconciliation never overwrite newer access; timestamps paginate', async () => {
@@ -185,6 +232,45 @@ test('cleanup publishes hundreds of removals in one commit using configured rete
     assert.equal(await getAccessTime(env, second), 15 * 86400000);
 });
 
+for (const failure of [false, true]) {
+    test(`large cleanup ${failure ? 'recovers after GitHub failure' : 'completes'} within a 50-request invocation budget`, async t => {
+        const { env, sqlite } = fixture();
+        const now = RETENTION_MS * 3;
+        t.mock.method(Date, 'now', () => now);
+        t.mock.method(console, 'error', () => {});
+        const ids = Array.from({ length: 18250 }, (_, index) => index.toString(36).padStart(32, '0'));
+        const expired = ids.slice(0, 12050);
+        const active = ids.slice(12050, 13100);
+        const locked = ids.slice(13100, 14150);
+        const untracked = ids.slice(14150, 16200);
+        const orphans = ids.slice(16200);
+        const insert = sqlite.prepare('INSERT INTO image_access (image_id, last_accessed_at, locked) VALUES (?, ?, ?)');
+        sqlite.exec('BEGIN');
+        for (const image of [...expired, ...orphans]) insert.run(image, 1, 0);
+        for (const image of active) insert.run(image, now, 0);
+        for (const image of locked) insert.run(image, 1, 1);
+        sqlite.exec('COMMIT');
+        const paths = ids.slice(0, 16200).map(image => `${image}.png`);
+        const { commits } = mockCleanupGithub(t, paths, { fail: failure });
+        const counts = enforceCleanupRequestBudget(t, env);
+        const result = await cleanupInactiveImages(env, now);
+        assert.equal(result.initialized, untracked.length);
+        assert.equal(result.orphanedMetadataRemoved, orphans.length);
+        assert.equal(counts.database, 5);
+        assert.equal(counts.github, failure ? 20 : 8);
+        assert.equal(counts.total, failure ? 25 : 13);
+        assert.equal(result.deleted, failure ? 0 : expired.length);
+        assert.equal(result.failed, failure ? expired.length : 0);
+        assert.equal(commits.length, failure ? 3 : 1);
+        const rows = sqlite.prepare('SELECT image_id, last_accessed_at, locked, deleting FROM image_access').all();
+        assert.equal(rows.length, active.length + locked.length + untracked.length + (failure ? expired.length : 0));
+        assert.ok(rows.every(row => row.deleting === 0));
+        const rowsById = new Map(rows.map(row => [row.image_id, row]));
+        assert.ok(locked.every(image => rowsById.get(image)?.locked === 1));
+        assert.ok([...active, ...untracked].every(image => rowsById.get(image)?.last_accessed_at === now));
+    });
+}
+
 test('cleanup rebuilds its deletion commit on the latest head after a concurrent upload', async t => {
     const { env } = fixture();
     await recordAccess(env, id, 1);
@@ -197,45 +283,27 @@ test('cleanup rebuilds its deletion commit on the latest head after a concurrent
     assert.equal(await getAccessTime(env, id), null);
 });
 
-test('cleanup rechecks access renewed after its initial snapshot', async t => {
+test('cleanup atomically preserves access and locks renewed before its deletion batch', async t => {
     const { env } = fixture();
     const now = RETENTION_MS * 2;
     await recordAccess(env, id, 1);
-    const originalPrepare = env.DB.prepare;
-    env.DB.prepare = (sql, args = []) => {
-        const statement = originalPrepare(sql, args);
-        if (sql.includes('ORDER BY image_id')) {
-            const all = statement.all;
-            statement.all = async () => {
-                const snapshot = await all();
-                await recordAccess(env, id, now);
-                return snapshot;
-            };
-        }
-        // The real query is executed after bind().
-        const bind = statement.bind;
-        statement.bind = (...values) => {
-            const bound = bind(...values);
-            if (sql.includes('ORDER BY image_id')) {
-                const all = bound.all;
-                bound.all = async () => {
-                    const snapshot = await all();
-                    await recordAccess(env, id, now);
-                    return snapshot;
-                };
-            }
-            return bound;
-        };
-        return statement;
+    await recordAccess(env, second, 1);
+    const originalBatch = env.DB.batch;
+    env.DB.batch = async statements => {
+        await recordAccess(env, id, now);
+        await setLocked(env, second, true);
+        return originalBatch(statements);
     };
     let calls = 0;
     t.mock.method(globalThis, 'fetch', async () => {
         calls++;
-        return Response.json({ tree: [{ path: `${id}.jpeg`, type: 'blob' }] });
+        return Response.json({ tree: [id, second].map(image => ({ path: `${image}.jpeg`, type: 'blob' })) });
     });
-    await cleanupInactiveImages(env, now);
+    const result = await cleanupInactiveImages(env, now);
     assert.equal(calls, 1);
+    assert.equal(result.deleted, 0);
     assert.equal(await getAccessTime(env, id), now);
+    assert.equal(await getAccessTime(env, second), 1);
 });
 
 function adminRequest(path: string, init: RequestInit = {}, password = 'test-password') {

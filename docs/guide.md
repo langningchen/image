@@ -144,6 +144,10 @@ In `/admin/` → **Overview** or **Image library**, click **Clean up expired ima
 
 The authenticated endpoint is `POST /api/admin/cleanup`; it uses the server's current time and retention configuration. Failed deletions retain their metadata and release their claims for retry. This removes files from the current data branch. The data repository's separate daily Action cleans their Git history afterward.
 
+Cleanup uses set-based SQL in D1 batch transactions to initialize missing records, atomically claim expired unlocked images, and finalize or release claims. It does not fetch every access timestamp or issue database requests per image. SQL statements process groups of 1,000 IDs through JSON parameters, avoiding D1's bound-parameter limit. Orphan metadata is reconciled in one conditional delete that preserves recent upload reservations.
+
+A normal run with deletions uses five D1 calls and eight GitHub requests, including a single deletion commit. Regression tests enforce a 50-request budget while processing over 16,000 repository images, including 12,050 deletions, and verify failure recovery within that budget. D1 batches count as one call against the [per-invocation query limit](https://developers.cloudflare.com/d1/platform/limits/); increasing Worker limits is not required for this optimization.
+
 ## Purge deleted files from Git history
 
 Deleting a file normally leaves its content in Git history. This repository includes a second cleanup stage under `target-repository/`:
