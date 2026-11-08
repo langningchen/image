@@ -6,6 +6,7 @@ import { prepareImage } from '../prepareImage';
 import { jsonBody, type Api, type Run } from './model';
 import { Evidence, Icon } from './ui';
 import UploadSettings from './UploadSettings';
+import RepositorySettings from './RepositorySettings';
 import type { UploadLimits } from '../../uploadLimits';
 
 interface ModelTest {
@@ -37,6 +38,7 @@ export default function ModelSettings({ api, run, busy, fallback, onFallback, up
   }
   return <div className="settings-stack">
     <UploadSettings api={api} run={run} busy={busy} limits={uploadLimits} onLimits={onUploadLimits} />
+    <RepositorySettings api={api} run={run} busy={busy} />
     <section className="settings-section"><div className="settings-description"><span className="eyebrow">UPLOAD POLICY</span><h2>When AI is unavailable</h2><p>Choose what happens if assessment times out, fails, or returns an inconclusive answer.</p></div><div className="panel settings-card"><h3>Assessment fallback</h3><div className="policy-options">
       {(['allow', 'deny'] as const).map(value => <label className={`policy-option ${policy === value ? 'chosen' : ''}`} key={value}><AdminInput type="radio" name="fallback" value={value} checked={policy === value} disabled={busy} onChange={() => setPolicy(value)} /><span><strong>{value === 'allow' ? 'Allow and queue for review' : 'Reject the upload'}</strong><small>{value === 'allow' ? 'Keep the image and flag it for a manual decision.' : 'Keep an audit record without storing the image.'}</small></span></label>)}
     </div><p className="field-help">Explicitly prohibited content is always rejected. A policy managed by the environment cannot be changed here.</p><AdminButton className="button primary" disabled={busy || policy === fallback} onClick={() => void run(async () => { const response = await api<{ fallback: 'allow' | 'deny' }>('/moderation-settings', jsonBody({ fallback: policy }, 'PATCH')); onFallback(response.fallback); })}>Save policy</AdminButton></div></section>

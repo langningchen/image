@@ -2,7 +2,7 @@ name: Purge deleted image history
 
 on:
   schedule:
-    - cron: "23 4 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -20,15 +20,14 @@ jobs:
       - name: Check out complete default-branch history
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
       - name: Install git-filter-repo
         run: python3 -m pip install --disable-pip-version-check git-filter-repo
 
-      - name: Purge eligible image paths
+      - name: Purge deleted image paths
         id: filter
-        env:
-          RETENTION_DAYS: "7"
         run: |
           before_sha="$(git rev-parse HEAD)"
           remote_url="$(git remote get-url origin)"
@@ -51,7 +50,7 @@ jobs:
         env:
           BEFORE_SHA: ${{ steps.filter.outputs.before_sha }}
           REMOTE_URL: ${{ steps.filter.outputs.remote_url }}
-          TARGET_BRANCH: ${{ github.ref_name }}
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           if git remote get-url origin >/dev/null 2>&1; then
             git remote set-url origin "$REMOTE_URL"

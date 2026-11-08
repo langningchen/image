@@ -10,6 +10,7 @@ Built with React, Cloudflare Workers and D1. Images are stored in a dedicated pr
 - Configure a maximum image edge and upload size independently from the admin settings, or disable either limit.
 - AI moderation, optional upload password and automatic inactivity cleanup.
 - Administration at `/admin/`: image filters, manual review, retention locks, IP controls and traffic statistics.
+- Sync the data repository’s daily deleted-image history cleanup workflow and script from Settings.
 
 ## Quick Start
 

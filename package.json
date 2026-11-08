@@ -5,18 +5,19 @@
   "packageManager": "pnpm@12.18.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "node scripts/generate-repository-config.mjs && vite build",
     "dev": "vite",
     "deploy": "pnpm build && node scripts/wrangler.mjs deploy",
     "start": "pnpm build && wrangler dev --test-scheduled",
     "cf-typegen": "wrangler types",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
-    "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.ts",
+    "typecheck": "node scripts/generate-repository-config.mjs && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
+    "test": "node scripts/generate-repository-config.mjs && node --experimental-strip-types --test --test-isolation=none tests/*.test.ts",
     "debug:moderation": "node --experimental-strip-types scripts/debug-moderation.ts",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "node scripts/wrangler.mjs d1 migrations apply DB --remote",
     "wrangler:remote": "node scripts/wrangler.mjs",
-    "db:import:kv": "node scripts/import-kv.mjs"
+    "db:import:kv": "node scripts/import-kv.mjs",
+    "generate:repository-config": "node scripts/generate-repository-config.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

@@ -2,43 +2,23 @@
 
 set -euo pipefail
 
-retention_days="${RETENTION_DAYS:-7}"
-now_epoch="${NOW_EPOCH:-$(date -u +%s)}"
-
-if ! [[ "$retention_days" =~ ^[0-9]+$ ]] || (( retention_days < 1 )); then
-    echo "RETENTION_DAYS must be a positive integer." >&2
-    exit 1
-fi
-if ! [[ "$now_epoch" =~ ^[0-9]+$ ]]; then
-    echo "NOW_EPOCH must be a Unix timestamp." >&2
-    exit 1
-fi
-
-cutoff_epoch=$((now_epoch - retention_days * 86400))
-current_commit_epoch=0
-declare -A latest_deletion_by_path=()
-
-# The image service accepts 32-character lowercase alphanumeric image names at repository
-# root. Restricting the match protects unrelated files from a history rewrite.
-while IFS= read -r line; do
-    if [[ "$line" == @@DELETE_COMMIT:* ]]; then
-        current_commit_epoch="${line#@@DELETE_COMMIT:}"
-    elif [[ "$line" =~ ^[0-9a-z]{32}\.(jpeg|png|webp)$ ]] && [[ -z "${latest_deletion_by_path[$line]+present}" ]]; then
-        # git log is newest-first, so the first deletion seen is the latest one.
-        latest_deletion_by_path["$line"]="$current_commit_epoch"
-    fi
-done < <(git log HEAD --no-renames --diff-filter=D --format='@@DELETE_COMMIT:%ct' --name-only -- '*.jpeg' '*.png' '*.webp')
-
+# Only root-level image files absent from HEAD are eligible. A file re-added
+# since its deletion must keep its history, regardless of when it was deleted.
+# Capture git log first so a failed history read stops the workflow.
+deleted_paths="$(git log HEAD --no-renames --diff-filter=D --format= --name-only -- '*.jpeg' '*.png' '*.webp')"
+declare -A seen_paths=()
 purge_paths=()
-for path in "${!latest_deletion_by_path[@]}"; do
-    deletion_epoch="${latest_deletion_by_path[$path]}"
-    if (( deletion_epoch <= cutoff_epoch )) && ! git cat-file -e "HEAD:$path" 2>/dev/null; then
-        purge_paths+=("$path")
+while IFS= read -r path; do
+    if [[ "$path" =~ ^[0-9a-z]{32}\.(jpeg|png|webp)$ ]] && [[ -z "${seen_paths[$path]+present}" ]]; then
+        seen_paths["$path"]=1
+        if ! git cat-file -e "HEAD:$path" 2>/dev/null; then
+            purge_paths+=("$path")
+        fi
     fi
-done
+done <<< "$deleted_paths"
 
 if (( ${#purge_paths[@]} == 0 )); then
-    echo "No image histories are old enough to purge."
+    echo "No deleted image histories to purge."
     exit 0
 fi
 

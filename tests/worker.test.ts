@@ -1,7 +1,9 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { repositoryConfigFiles } from '../src/worker/repository-config.generated.ts';
 import worker from '../src/worker/index.ts';
 import { recordAccess, initializeAccess, getAccessTime, listAccessTimes } from '../src/worker/repositories/access.ts';
 import { cleanupInactiveImages } from '../src/worker/services/cleanup.ts';
@@ -41,6 +43,35 @@ function fixture(alphanumericIds = true) {
     const pending: Promise<unknown>[] = [];
     const ctx = { waitUntil: (promise: Promise<unknown>) => pending.push(promise) };
     return { env, ctx, pending, sqlite };
+}
+
+function mockCleanupGithub(t: TestContext, paths: string[], options: { fail?: boolean; conflicts?: number; entries?: { path: string; type: string; sha?: string; mode?: string }[]; truncated?: boolean } = {}) {
+    const trees: any[] = [];
+    const commits: any[] = [];
+    const updates: any[] = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        const path = new URL(url).pathname.replace('/repos/test/images', '');
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (path === '') return Response.json({ default_branch: 'main' });
+        if (path === '/git/ref/heads/main') return Response.json({ object: { sha: `head-${updates.length}` } });
+        if (path.startsWith('/git/commits/') && !body) return Response.json({ tree: { sha: `base-${updates.length}` } });
+        if (path.startsWith('/git/trees/')) return Response.json({ truncated: options.truncated, tree: options.entries ?? paths.map(path => ({ path, type: 'blob' })) });
+        if (path === '/git/trees' && init?.method === 'POST') {
+            trees.push(body);
+            return Response.json({ sha: 'deletion-tree' });
+        }
+        if (path === '/git/commits' && init?.method === 'POST') {
+            commits.push(body);
+            return Response.json({ sha: 'deletion-commit' });
+        }
+        if (path === '/git/refs/heads/main' && init?.method === 'PATCH') {
+            updates.push(body);
+            if (options.fail || updates.length <= (options.conflicts ?? 0)) return new Response('Conflict', { status: 409 });
+            return Response.json({});
+        }
+        throw new Error(`Unexpected GitHub request: ${init?.method ?? 'GET'} ${path}`);
+    });
+    return { trees, commits, updates };
 }
 
 test('D1 upserts and reconciliation never overwrite newer access; timestamps paginate', async () => {
@@ -105,14 +136,10 @@ test('cleanup deletes inactive files, grants missing images grace and removes or
     const orphan = 'c'.repeat(32);
     await recordAccess(env, id, 1);
     await recordAccess(env, orphan, 1);
-    const deleted: string[] = [];
-    t.mock.method(globalThis, 'fetch', async (url, init) => {
-        if (String(url).includes('/git/trees/')) return Response.json({ tree: [id, second].map(image => ({ path: `${image}.jpeg`, type: 'blob' })) });
-        if (init?.method === 'DELETE') { deleted.push(String(url)); return Response.json({}); }
-        return Response.json({ sha: 'sha' });
-    });
+    const { trees, commits } = mockCleanupGithub(t, [id, second].map(image => `${image}.jpeg`));
     await cleanupInactiveImages(env, now);
-    assert.equal(deleted.length, 1);
+    assert.equal(commits.length, 1);
+    assert.deepEqual(trees[0].tree, [{ path: `${id}.jpeg`, mode: '100644', type: 'blob', sha: null }]);
     assert.equal(await getAccessTime(env, id), null);
     assert.equal(await getAccessTime(env, second), now);
     assert.equal(await getAccessTime(env, orphan), null);
@@ -130,13 +157,44 @@ test('cleanup preserves metadata when GitHub deletion fails', async t => {
     const { env } = fixture();
     await recordAccess(env, id, 1);
     t.mock.method(console, 'error', () => {});
-    t.mock.method(globalThis, 'fetch', async (url, init) => {
-        if (String(url).includes('/git/trees/')) return Response.json({ tree: [{ path: `${id}.jpeg`, type: 'blob' }] });
-        if (init?.method === 'DELETE') return new Response('Conflict', { status: 409 });
-        return Response.json({ sha: 'sha' });
-    });
+    const { updates } = mockCleanupGithub(t, [`${id}.jpeg`], { fail: true });
     await cleanupInactiveImages(env, RETENTION_MS * 2);
+    assert.equal(updates.length, 3);
     assert.equal(await getAccessTime(env, id), 1);
+    assert.equal(await claimDeletion(env, id, RETENTION_MS), true);
+
+});
+
+test('cleanup publishes hundreds of removals in one commit using configured retention', async t => {
+    const { env } = fixture();
+    const configuredEnv = { ...env, IMAGE_RETENTION_DAYS: '30' };
+    const ids = Array.from({ length: 205 }, (_, index) => index.toString(36).padStart(32, '0'));
+    for (const imageId of ids) await recordAccess(env, imageId, 1);
+    await recordAccess(env, second, 15 * 86400000);
+    const paths = ids.map((imageId, index) => `${imageId}.${index % 2 ? 'png' : 'webp'}`);
+    const { trees, commits, updates } = mockCleanupGithub(t, [...paths, `${second}.jpeg`, 'README.md']);
+    await cleanupInactiveImages(configuredEnv, 31 * 86400000);
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0].message, 'Delete 205 inactive images after 30 days without access');
+    assert.deepEqual(commits[0].parents, ['head-0']);
+    assert.equal(trees[0].base_tree, 'base-0');
+    assert.deepEqual(trees[0].tree.map((entry: any) => entry.path), paths);
+    assert.ok(trees[0].tree.every((entry: any) => entry.sha === null));
+    assert.deepEqual(updates, [{ sha: 'deletion-commit', force: false }]);
+    assert.equal((await listAccessTimes(env)).size, 1);
+    assert.equal(await getAccessTime(env, second), 15 * 86400000);
+});
+
+test('cleanup rebuilds its deletion commit on the latest head after a concurrent upload', async t => {
+    const { env } = fixture();
+    await recordAccess(env, id, 1);
+    const { trees, commits, updates } = mockCleanupGithub(t, [`${id}.jpeg`], { conflicts: 1 });
+    await cleanupInactiveImages(env, RETENTION_MS * 2);
+    assert.equal(updates.length, 2);
+    assert.equal(trees[1].base_tree, 'base-1');
+    assert.deepEqual(commits[1].parents, ['head-1']);
+    assert.ok(updates.every(update => update.force === false));
+    assert.equal(await getAccessTime(env, id), null);
 });
 
 test('cleanup rechecks access renewed after its initial snapshot', async t => {
@@ -186,6 +244,74 @@ function adminRequest(path: string, init: RequestInit = {}, password = 'test-pas
 function uploadRequest(ip = '203.0.113.1') {
     return new Request('https://image.test/upload', { method: 'POST', headers: { 'CF-Connecting-IP': ip, [CONSENT_HEADER]: TERMS_VERSION }, body: ONE_PIXEL_PNG_DATA_URL });
 }
+
+test('repository configuration sync requires admin credentials and same-origin requests', async t => {
+    const { env, ctx } = fixture();
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('Unexpected GitHub request'); });
+    assert.equal((await worker.fetch(adminRequest('/repository-config', { method: 'POST' }, 'wrong'), env, ctx)).status, 401);
+    assert.equal((await worker.fetch(adminRequest('/repository-config', { method: 'POST', headers: { Origin: 'https://other.test' } }), env, ctx)).status, 403);
+    assert.equal((await worker.fetch(adminRequest('/repository-config'), env, ctx)).status, 404);
+    assert.equal(calls, 0);
+});
+
+test('repository configuration sync publishes the daily workflow and script in one commit', async t => {
+    const { env, ctx } = fixture();
+    const { trees, commits, updates } = mockCleanupGithub(t, [`${id}.png`, 'README.md']);
+    const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { changed: 2, repository: 'test/images' });
+    assert.equal(commits.length, 1);
+    assert.deepEqual(trees[0].tree, repositoryConfigFiles.map(file => ({ ...file, type: 'blob' })));
+    assert.equal(trees[0].base_tree, 'base-0');
+    assert.deepEqual(commits[0].parents, ['head-0']);
+    assert.deepEqual(updates, [{ sha: 'deletion-commit', force: false }]);
+    for (const file of repositoryConfigFiles) {
+        assert.equal(file.content, readFileSync(new URL(`../target-repository/${file.path}`, import.meta.url), 'utf8'));
+    }
+    const workflow = repositoryConfigFiles.find(file => file.path.endsWith('.yml'))!.content;
+    assert.match(workflow, /cron: "0 0 \* \* \*"/);
+    assert.match(workflow, /workflow_dispatch:/);
+    assert.doesNotMatch(workflow, /RETENTION_DAYS/);
+    assert.match(workflow, /--force-with-lease=/);
+});
+
+test('repository configuration sync skips unchanged files and updates only changed configuration', async t => {
+    const { env, ctx } = fixture();
+    const entries = repositoryConfigFiles.map(file => ({ path: file.path, mode: file.mode, type: 'blob',
+        sha: createHash('sha1').update(`blob ${Buffer.byteLength(file.content)}\0`).update(file.content).digest('hex') }));
+    const { trees, commits } = mockCleanupGithub(t, [], { entries });
+    const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.deepEqual(await response.json(), { changed: 0, repository: 'test/images' });
+    assert.equal(commits.length, 0);
+    entries[1].sha = 'old-script-sha';
+    const updated = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.deepEqual(await updated.json(), { changed: 1, repository: 'test/images' });
+    assert.equal(commits.length, 1);
+    assert.equal(trees[0].tree.length, 1);
+    assert.equal(trees[0].tree[0].path, 'scripts/purge-deleted-image-history.sh');
+});
+
+test('failed repository configuration sync reports actionable guidance without exposing credentials', async t => {
+    const { env, ctx } = fixture();
+    const { updates } = mockCleanupGithub(t, [], { fail: true });
+    t.mock.method(console, 'error', () => {});
+    const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.match(result.error, /Contents and Workflows write permissions/);
+    assert.doesNotMatch(result.error, /test-password|Bearer/);
+    assert.equal(updates.length, 3);
+});
+
+test('repository configuration sync stops before writing when the current tree is truncated', async t => {
+    const { env, ctx } = fixture();
+    const { trees, commits, updates } = mockCleanupGithub(t, [], { truncated: true });
+    t.mock.method(console, 'error', () => {});
+    const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+    assert.equal(response.status, 502);
+    assert.deepEqual([trees.length, commits.length, updates.length], [0, 0, 0]);
+});
 
 test('uploads require current consent before reading data or invoking AI, including exempt IPs', async t => {
     const { env, ctx, pending } = fixture();
@@ -456,19 +582,10 @@ test('cleanup recognizes PNG and WebP paths and preserves locked images', async 
     await recordAccess(env, id, 1);
     await recordAccess(env, second, 1);
     await setLocked(env, second, true);
-    const deleted: string[] = [];
-    t.mock.method(globalThis, 'fetch', async (url, init) => {
-        if (String(url).includes('/git/trees/')) return Response.json({ tree: [
-            { path: `${id}.png`, type: 'blob' },
-            { path: `${second}.webp`, type: 'blob' },
-            { path: `nested/${id}.png`, type: 'blob' },
-        ] });
-        if (init?.method === 'DELETE') { deleted.push(String(url)); return Response.json({}); }
-        return Response.json({ sha: 'sha' });
-    });
+    const { trees, commits } = mockCleanupGithub(t, [`${id}.png`, `${second}.webp`, `nested/${id}.png`]);
     await cleanupInactiveImages(env, RETENTION_MS * 2);
-    assert.equal(deleted.length, 1);
-    assert.ok(deleted[0].endsWith(`${id}.png`));
+    assert.equal(commits.length, 1);
+    assert.deepEqual(trees[0].tree, [{ path: `${id}.png`, mode: '100644', type: 'blob', sha: null }]);
     assert.equal(await getAccessTime(env, id), null);
     assert.ok(sqlite.prepare('SELECT locked FROM image_access WHERE image_id = ?').get(second)?.locked);
 });

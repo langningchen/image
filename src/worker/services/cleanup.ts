@@ -1,7 +1,7 @@
 import type { Env } from '../types.ts';
 import { claimDeletion, releaseDeletion, recoverDeletionClaims } from '../repositories/management.ts';
 import { retentionMs } from '../config.ts';
-import { listCurrentImages, deleteImageFromGithub } from '../repositories/github.ts';
+import { listCurrentImages, deleteImagesFromGithub } from '../repositories/github.ts';
 import { listAccessTimes, getAccessTime, initializeAccess, removeAccess, removeAccessBatch } from '../repositories/access.ts';
 const BATCH_SIZE = 100;
 
@@ -11,7 +11,7 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
     const accessTimes = await listAccessTimes(env);
     const cutoff = now - retentionMs(env);
 
-    // Give images uploaded before this feature a full seven days from the first
+    // Give images uploaded before this feature a full retention period from the first
     // cleanup run instead of deleting them without a known last-access time.
     const missingIds = [...currentImages.keys()].filter((imageId) => !accessTimes.has(imageId));
     for (let index = 0; index < missingIds.length; index += BATCH_SIZE) {
@@ -23,8 +23,7 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
         .map(([imageId]) => imageId);
 
     let deletedCount = 0;
-    // GitHub's Contents API creates one commit per deletion. Keep these calls
-    // serial so parallel commits do not race while updating the same branch.
+    const claimedIds: string[] = [];
     for (const imageId of staleIds) {
         try {
             // Re-read immediately before deletion to reduce the chance that a
@@ -35,12 +34,30 @@ export async function cleanupInactiveImages(env: Env, now: number): Promise<void
             }
 
             if (!(await claimDeletion(env, imageId, cutoff))) continue;
-            await deleteImageFromGithub(env, imageId, currentImages.get(imageId));
-            await removeAccess(env, imageId);
-            deletedCount += 1;
+            claimedIds.push(imageId);
         } catch (error) {
             await releaseDeletion(env, imageId);
             console.error('Scheduled image deletion failed:', imageId, error);
+        }
+    }
+
+    if (claimedIds.length) {
+        let published = false;
+        try {
+            await deleteImagesFromGithub(env, claimedIds.map(id => `${id}.${currentImages.get(id)}`),
+                `after ${retentionMs(env) / 86400000} days without access`);
+            published = true;
+            for (const imageId of claimedIds) {
+                await removeAccess(env, imageId);
+                deletedCount += 1;
+            }
+        } catch (error) {
+            // Keep claims if GitHub succeeded but metadata cleanup failed;
+            // reconciliation will remove that metadata on the next run.
+            if (!published) {
+                for (const imageId of claimedIds) await releaseDeletion(env, imageId);
+            }
+            console.error('Scheduled batch image deletion failed:', error);
         }
     }
 

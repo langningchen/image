@@ -138,10 +138,14 @@ If you skip importing, the first daily cleanup initializes existing images with 
 
 Deleting a file normally leaves its content in Git history. This repository includes a second cleanup stage under `target-repository/`:
 
-- `scripts/purge-deleted-image-history.sh` finds root-level image files that are absent from `HEAD` and whose latest deletion commit is at least seven days old. It removes those paths from the branch's entire history with `git-filter-repo`.
-- `.github/workflows/purge-deleted-image-history.yml` runs the script every day at `04:23 UTC` and performs a lease-protected force-push only when history changed.
+- `scripts/purge-deleted-image-history.sh` finds deleted root-level image files that are absent from `HEAD`, with no additional waiting period after deletion. Files re-added and still present in `HEAD` are preserved. It removes those paths from the branch's entire history with `git-filter-repo`.
+- `.github/workflows/purge-deleted-image-history.yml` runs the script every day at `00:00 UTC` (08:00 China time) and performs a lease-protected force-push only when history changed.
 
-Deploy these two files **in the dedicated target image repository**, not only in this application repository. From a checkout of this project, copy them into a checkout of the target repository:
+In `/admin/` → **Settings** → **Daily history cleanup**, click **Sync to data repository** to install or update both files in the configured `GITHUB_OWNER/GITHUB_REPO` repository. The button writes one commit on the default branch, preserves unrelated files, retries concurrent branch updates, and skips files whose content and mode already match. It does not export application credentials or D1 records. After changing the templates locally, deployment bundles the updated files automatically; `pnpm generate:repository-config` also refreshes the Worker bundle explicitly.
+
+The configured PAT must be able to write workflow files as well as repository contents: a fine-grained token needs **Contents: write** and **Workflows: write**, while a classic PAT needs the appropriate repository scope plus **workflow**. Syncing the files does not change GitHub repository settings: enable Actions and allow the daily workflow to force-push on the dedicated data repository’s default branch.
+
+Alternatively, deploy these two files **in the dedicated target image repository** manually. From a checkout of this project, copy them into a checkout of the target repository:
 
 ```sh
 cp -R target-repository/.github /path/to/image-data/
@@ -150,7 +154,7 @@ cp target-repository/scripts/purge-deleted-image-history.sh /path/to/image-data/
 chmod +x /path/to/image-data/scripts/purge-deleted-image-history.sh
 ```
 
-Commit and push the copied files in the target repository. Then:
+If copying manually, commit and push the files in the target repository. After either installation method:
 
 1. Open the target repository's **Settings → Actions → General** and set **Workflow permissions** to **Read and write permissions**.
 2. Ensure the default branch permits this workflow to force-push. Branch protection or rulesets that reject force-pushes must be adjusted for this dedicated repository.

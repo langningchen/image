@@ -39,15 +39,15 @@ test('KV import retains mixed and numeric IDs, ignores invalid keys and preserve
     assert.equal(rows[1].last_accessed_at, 250);
 });
 
-test('history cleanup selects old root-level alphanumeric images without touching unrelated paths', t => {
+test('daily history cleanup selects deleted root-level images and preserves re-added images and unrelated paths', t => {
     const directory = mkdtempSync(join(tmpdir(), 'image-history-test-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
-    const selected = [`${'a1'.repeat(16)}.jpeg`, `${'0'.repeat(32)}.png`, `${'b2'.repeat(16)}.webp`];
+    const selected = [`${'d1'.repeat(16)}.png`, `${'a1'.repeat(16)}.jpeg`, `${'0'.repeat(32)}.png`, `${'b2'.repeat(16)}.webp`];
+    const kept = `${'e1'.repeat(16)}.png`;
     const logPath = join(directory, 'deletions.txt');
     const argsPath = join(directory, 'filter-args.json');
     writeFileSync(logPath, [
-        '@@DELETE_COMMIT:1900000', `${'d1'.repeat(16)}.png`,
-        '@@DELETE_COMMIT:1000000', ...selected,
+        ...selected, selected[0], kept,
         `nested/${selected[0]}`, `${'A'.repeat(32)}.png`, `${'a'.repeat(31)}.jpeg`, 'README.md',
     ].join('\n'));
     // Fake git records the selected filter-repo arguments. No Git repository or
@@ -56,13 +56,13 @@ test('history cleanup selects old root-level alphanumeric images without touchin
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === 'log') process.stdout.write(fs.readFileSync(process.env.IMAGE_TEST_GIT_LOG));
-else if (args[0] === 'cat-file') process.exit(1);
+else if (args[0] === 'cat-file') process.exit(args[2] === 'HEAD:' + process.env.IMAGE_TEST_KEPT_PATH ? 0 : 1);
 else if (args[0] === 'filter-repo') fs.writeFileSync(process.env.IMAGE_TEST_GIT_ARGS, JSON.stringify(args));
 else process.exit(99);
 `, { mode: 0o755 });
     execFileSync('bash', [fileURLToPath(new URL('../target-repository/scripts/purge-deleted-image-history.sh', import.meta.url))], {
         cwd: directory,
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, NOW_EPOCH: '2000000', RETENTION_DAYS: '7', IMAGE_TEST_GIT_LOG: logPath, IMAGE_TEST_GIT_ARGS: argsPath },
+        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, IMAGE_TEST_KEPT_PATH: kept, IMAGE_TEST_GIT_LOG: logPath, IMAGE_TEST_GIT_ARGS: argsPath },
     });
     const args = JSON.parse(readFileSync(argsPath, 'utf8'));
     assert.deepEqual(args, ['filter-repo', '--force', '--invert-paths', ...selected.sort().flatMap(path => ['--path', path])]);
