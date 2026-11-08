@@ -12,6 +12,7 @@ import { getUploadLimits, setUploadLimits } from '../repositories/upload-setting
 import type { UploadLimits } from '../../uploadLimits.ts';
 import { syncRepositoryConfig } from '../services/repository-config.ts';
 import { cleanupInactiveImages } from '../services/cleanup.ts';
+import { retentionMs } from '../config.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -101,7 +102,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
             }
         }
         if (url.pathname === '/api/admin/moderation-settings') {
-            if (request.method === 'GET') return json({ fallback: await getFallback(env), counts: await moderationCounts(env) });
+            if (request.method === 'GET') return json({ fallback: await getFallback(env), counts: await moderationCounts(env), retentionMs: retentionMs(env) });
             if (request.method === 'PATCH') {
                 if (env.AI_MODERATION_FALLBACK !== undefined) return json({ error: 'Fallback is managed by AI_MODERATION_FALLBACK' }, 409);
                 let body: unknown;

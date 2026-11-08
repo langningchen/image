@@ -1325,6 +1325,8 @@ test('environment retention and AI configuration affect public configuration and
         ...DEFAULT_UPLOAD_LIMITS,
     });
     assert.equal(await getFallback(configured), 'deny');
+    const settings = await worker.fetch(adminRequest('/moderation-settings'), configured, ctx);
+    assert.equal((await settings.json()).retentionMs, 30 * 86400000);
     await recordAccess(env, id, 1000);
     const stats = await getRetentionDistribution(configured, 1000);
     assert.equal(stats.retentionMs, 30 * 86400000);

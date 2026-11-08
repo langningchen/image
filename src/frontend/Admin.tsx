@@ -10,12 +10,9 @@ import { Icon } from './admin/ui';
 import { Alert, Box, Button, Card, CardContent, CssBaseline, TextField, Typography } from '@mui/material';
 import AdminLayout from './admin/Layout';
 import type { UploadLimits } from '../uploadLimits';
+import { loadWorkspaceSection, type Section, type Settings, type ImagePage, type IpPage, type AuditPage } from './admin/workspace';
 
 interface CleanupResult { deleted: number; failed: number; failures: string[] }
-interface Settings { fallback: 'allow' | 'deny'; counts: { status: string; count: number }[] }
-interface ImagePage { images: ImageRow[]; nextCursor: string | null }
-interface IpPage { ips: ManagedIp[]; nextCursor: string | null }
-interface AuditPage { events: AuditEvent[]; nextCursor: number | null }
 const sections = [
   { id: 'overview', title: 'Overview', description: 'A clear view of your image library and its activity.', icon: 'overview' },
   { id: 'images', title: 'Image library', description: 'Find, review and take care of your images.', icon: 'images' },
@@ -23,7 +20,6 @@ const sections = [
   { id: 'ips', title: 'Network access', description: 'Manage trusted addresses and upload restrictions.', icon: 'ips' },
   { id: 'settings', title: 'Settings', description: 'Your upload policy, assessment model and diagnostics.', icon: 'settings' },
 ] as const;
-type Section = typeof sections[number]['id'];
 function createApi(token: string, unauthorized: () => void): Api {
   return async <T,>(path: string, init: RequestInit = {}, accept422 = false): Promise<T> => {
     const headers = new Headers(init.headers);
@@ -65,24 +61,24 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Something went wrong. Please try again.'); return false; }
     finally { setBusy(false); }
   }
-  async function refresh(signal?: AbortSignal) {
-    const init = { signal };
-    const [library, traffic, policies, limits, addresses, history] = await Promise.all([
-      api<ImagePage>(`/images?${imageQuery(filters)}`, init), api<Stats>(`/stats?days=${days}&sort=${order}`, init),
-      api<Settings>('/moderation-settings', init), api<UploadLimits>('/upload-settings', init),
-      api<IpPage>('/ips', init), api<AuditPage>('/assessment-audit', init),
-    ]);
+  async function refresh(signal?: AbortSignal, target = section, nextFilters = filters) {
+    const snapshot = await loadWorkspaceSection(api, target, nextFilters, days, order, signal);
     if (signal?.aborted) return;
-    setImages(library.images); setImageCursor(library.nextCursor); setStats(traffic); setSettings(policies);
-    setUploadLimits(limits);
-    setIps(addresses.ips); setIpCursor(addresses.nextCursor); setEvents(history.events); setAuditCursor(history.nextCursor); setUpdated(Date.now());
+    if (snapshot.library) { setImages(snapshot.library.images); setImageCursor(snapshot.library.nextCursor); }
+    if (snapshot.stats) setStats(snapshot.stats);
+    if (snapshot.settings) setSettings(snapshot.settings);
+    if (snapshot.limits) setUploadLimits(snapshot.limits);
+    if (snapshot.addresses) { setIps(snapshot.addresses.ips); setIpCursor(snapshot.addresses.nextCursor); }
+    if (snapshot.history) { setEvents(snapshot.history.events); setAuditCursor(snapshot.history.nextCursor); }
+    setUpdated(Date.now());
   }
   useEffect(() => {
     const controller = new AbortController();
+    setBusy(true); setError('');
     void refresh(controller.signal).catch(cause => { if (!controller.signal.aborted) setError((cause as Error).message); }).finally(() => { if (!controller.signal.aborted) setBusy(false); });
     return () => controller.abort();
-    // Each authenticated workspace owns a fresh initial snapshot.
-  }, [api]);
+    // Filters and pagination load explicitly. Navigation fetches only the visible section.
+  }, [api, section]);
   async function loadImages(nextFilters: Filters, cursor?: string | null) {
     const validation = filterError(nextFilters);
     if (validation) throw new Error(validation);
@@ -90,7 +86,11 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
     setImages(previous => cursor ? [...previous, ...result.images] : result.images);
     setImageCursor(result.nextCursor); setFilters(nextFilters);
   }
-  function explore(nextFilters: Filters) { setSection('images'); void run(() => loadImages(nextFilters)); }
+  function explore(nextFilters: Filters) {
+    setFilters(nextFilters);
+    if (section === 'images') void run(() => loadImages(nextFilters));
+    else setSection('images');
+  }
   async function changePeriod(value: number, nextOrder = order) {
     const traffic = await api<Stats>(`/stats?days=${value}&sort=${nextOrder}`);
     setDays(value); setOrder(nextOrder); setStats(traffic); setUpdated(Date.now());
@@ -114,7 +114,7 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
   });
   return <div className="admin-ui admin-shell">
     <a className="skip-link" href="#admin-main">Skip to content</a>
-    <aside className="sidebar"><Brand /><nav aria-label="Administration">{sections.map(item => <AdminButton key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} aria-label={item.title} title={item.title} aria-current={section === item.id ? 'page' : undefined} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.title}</span>{item.id === 'images' && needsReview > 0 && <span className="nav-count">{needsReview}</span>}</AdminButton>)}</nav><div className="sidebar-bottom"><AdminButton className="nav-item" aria-label="Sign out" title="Sign out" disabled={busy} onClick={onSignOut}><Icon name="logout" /><span>Sign out</span></AdminButton></div></aside>
+    <aside className="sidebar"><Brand /><nav aria-label="Administration">{sections.map(item => <AdminButton key={item.id} disabled={busy} className={`nav-item ${section === item.id ? 'active' : ''}`} aria-label={item.title} title={item.title} aria-current={section === item.id ? 'page' : undefined} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{item.title}</span>{item.id === 'images' && needsReview > 0 && <span className="nav-count">{needsReview}</span>}</AdminButton>)}</nav><div className="sidebar-bottom"><AdminButton className="nav-item" aria-label="Sign out" title="Sign out" disabled={busy} onClick={onSignOut}><Icon name="logout" /><span>Sign out</span></AdminButton></div></aside>
     <div className="workspace"><header className="topbar"><div className="breadcrumb">Workspace <Icon name="chevron" size={12} /><span>{current.title}</span></div><span className="topbar-status">Authenticated session</span></header>
       <main id="admin-main" className="main-content" aria-busy={busy}><div className="page-heading"><div><h1>{current.title}</h1><p>{current.description}</p></div><div className="heading-actions">{section === 'overview' && <div className="segmented" aria-label="Analytics period">{[7, 30, 90].map(value => <AdminButton key={value} disabled={busy} aria-pressed={days === value} className={days === value ? 'selected' : ''} onClick={() => void run(() => changePeriod(value))}>{value} days</AdminButton>)}</div>}{(section === 'overview' || section === 'images') && <AdminButton className="button" disabled={busy || cleaning} title="Delete all expired, unlocked images across the entire library" onClick={() => void cleanup()}><Icon name="refresh" size={16} />{cleaning ? 'Cleaning…' : 'Clean up expired images'}</AdminButton>}<AdminButton className="button refresh-button" disabled={busy} onClick={() => void run(() => refresh())}><Icon name="refresh" size={16} /><span>{busy ? 'Updating…' : 'Refresh'}</span></AdminButton></div></div>
         {error && <Alert severity="error" className="error-banner"><span>{error}</span><AdminButton className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={17} /></AdminButton></Alert>}
@@ -123,7 +123,7 @@ function Workspace({ api, onSignOut }: { api: Api; onSignOut: () => void }) {
         </Alert>}
         {busy && <div className="loading-line" role="status" aria-label="Loading" />}
         {section === 'overview' && <>{needsReview > 0 && <AdminButton className="review-banner" disabled={busy} onClick={() => explore({ ...emptyFilters, status: 'error' })}><span className="review-banner-icon"><Icon name="audit" /></span><span><strong>{needsReview} {needsReview === 1 ? 'image needs' : 'images need'} your attention</strong><small>AI assessment was unavailable. Review these images when you’re ready.</small></span><span className="review-banner-action">Open review queue<Icon name="arrow" size={17} /></span></AdminButton>}{stats ? <AdminAnalytics stats={stats} busy={busy} order={order} onOrderChange={value => void run(() => changePeriod(days, value))} onExplore={explore} /> : <div className="panel initial-loading"><Icon name="overview" size={28} /><h3>{busy ? 'Getting your workspace ready…' : 'Could not load the overview'}</h3><p>{busy ? 'Gathering your library and activity.' : 'Use Refresh to try again.'}</p></div>}<div className="overview-footer"><span>{updated ? `Updated ${new Date(updated).toLocaleTimeString()}` : 'Awaiting data'}</span><AdminButton className="text-link" disabled={busy} onClick={() => explore(emptyFilters)}>Explore your library<Icon name="arrow" size={15} /></AdminButton></div></>}
-        {section === 'images' && <ImageLibrary images={images} filters={filters} busy={busy} cursor={imageCursor} retentionMs={stats?.retention.retentionMs ?? 7 * 86400000} onApply={value => void run(() => loadImages(value))} onMore={() => void run(() => loadImages(filters, imageCursor))} onAction={(image, action) => run(async () => { if (action === 'lock') await api(`/images/${image.image_id}/lock`, jsonBody({ locked: !image.locked }, 'PATCH')); else await api(`/images/${image.image_id}/review`, jsonBody({ action })); await refresh(); })} />}
+        {section === 'images' && <ImageLibrary images={images} filters={filters} busy={busy} cursor={imageCursor} retentionMs={settings?.retentionMs ?? stats?.retention.retentionMs ?? 7 * 86400000} onApply={value => void run(() => loadImages(value))} onMore={() => void run(() => loadImages(filters, imageCursor))} onAction={(image, action) => run(async () => { if (action === 'lock') await api(`/images/${image.image_id}/lock`, jsonBody({ locked: !image.locked }, 'PATCH')); else await api(`/images/${image.image_id}/review`, jsonBody({ action })); await refresh(); })} />}
         {section === 'audit' && <ActivityLog events={events} cursor={auditCursor} busy={busy} onMore={() => void run(async () => { const result = await api<AuditPage>(`/assessment-audit?cursor=${auditCursor}`); setEvents(previous => [...previous, ...result.events]); setAuditCursor(result.nextCursor); })} />}
         {section === 'ips' && <NetworkAccess ips={ips} cursor={ipCursor} busy={busy} onUpdate={updateIp} onMore={() => void run(async () => { const result = await api<IpPage>(`/ips?cursor=${encodeURIComponent(ipCursor!)}`); setIps(previous => [...previous, ...result.ips]); setIpCursor(result.nextCursor); })} />}
         {section === 'settings' && settings && uploadLimits && <ModelSettings key={settings.fallback} api={api} run={run} busy={busy} fallback={settings.fallback} onFallback={fallback => setSettings(previous => previous ? { ...previous, fallback } : previous)} uploadLimits={uploadLimits} onUploadLimits={setUploadLimits} />}
