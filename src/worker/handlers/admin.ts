@@ -10,7 +10,7 @@ import { assessImage } from '../services/moderation.ts';
 import { assessmentFailure } from '../repositories/assessment.ts';
 import { getUploadLimits, setUploadLimits } from '../repositories/upload-settings.ts';
 import type { UploadLimits } from '../../uploadLimits.ts';
-import { syncRepositoryConfig } from '../services/repository-config.ts';
+import { syncRepositoryConfig, repositoryConfigFailure } from '../services/repository-config.ts';
 
 function json(value: unknown, status = 200): Response {
     return Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
@@ -46,8 +46,9 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
                 const result = await syncRepositoryConfig(env);
                 return json({ ...result, repository: `${env.GITHUB_OWNER}/${env.GITHUB_REPO}` });
             } catch (error) {
-                console.error('Repository configuration sync failed:', error);
-                return json({ error: 'Could not sync repository configuration. Check repository access, Contents and Workflows write permissions, and branch rules.' }, 502);
+                const details = repositoryConfigFailure(error, env);
+                console.error('Repository configuration sync failed:', details);
+                return json(details, 502);
             }
         }
         if (request.method === 'POST' && url.pathname === '/api/admin/model-test') {

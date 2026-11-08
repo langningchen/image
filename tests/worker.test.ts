@@ -299,9 +299,48 @@ test('failed repository configuration sync reports actionable guidance without e
     const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
     assert.equal(response.status, 502);
     const result = await response.json();
-    assert.match(result.error, /Contents and Workflows write permissions/);
+    assert.match(result.error, /Update default branch failed \(GitHub HTTP 409\): Conflict/);
+    assert.equal(result.operation, 'Update default branch');
+    assert.equal(result.githubStatus, 409);
     assert.doesNotMatch(result.error, /test-password|Bearer/);
     assert.equal(updates.length, 3);
+});
+
+test('repository sync exposes the exact GitHub failure stage and redacts secrets', async t => {
+    const { env, ctx } = fixture();
+    env.GITHUB_PAT = 'github_pat_PRIVATE_TOKEN';
+    t.mock.method(console, 'error', () => {});
+    const scenarios = [
+        { path: '', operation: 'Read repository', status: 401, message: 'Bad credentials' },
+        { path: '/git/ref/heads/main', operation: 'Read default branch', status: 404, message: 'Not Found' },
+        { path: '/git/trees', operation: 'Create repository tree', status: 422, message: 'Validation Failed' },
+        { path: '/git/commits', operation: 'Create commit', status: 403, message: 'Resource not accessible by personal access token' },
+        { path: '/git/refs/heads/main', operation: 'Update default branch', status: 422,
+            message: 'refusing to allow a Personal Access Token to create or update workflow without workflow scope' },
+        { path: '', operation: 'Read repository', status: 403, message: 'API rate limit exceeded' },
+    ];
+    for (const scenario of scenarios) {
+        const { updates } = mockCleanupGithub(t, []);
+        const successfulFetch = globalThis.fetch;
+        t.mock.method(globalThis, 'fetch', async (url, init) => {
+            const path = new URL(url).pathname.replace('/repos/test/images', '');
+            if (path === scenario.path) return Response.json({ message: scenario.message,
+                errors: [{ message: `Diagnostic includes ${env.GITHUB_PAT} and ${env.ADMIN_PASSWORD}` }] },
+                { status: scenario.status, headers: { 'X-GitHub-Request-Id': 'request-id' } });
+            return successfulFetch(url, init);
+        });
+        const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
+        assert.equal(response.status, 502);
+        const result = await response.json();
+        assert.equal(result.operation, scenario.operation);
+        assert.equal(result.githubStatus, scenario.status);
+        assert.equal(result.requestId, 'request-id');
+        assert.ok(result.error.includes(scenario.message));
+        assert.match(result.error, /\[redacted\]/);
+        assert.ok(!result.error.includes(env.GITHUB_PAT));
+        assert.ok(!result.error.includes(env.ADMIN_PASSWORD));
+        assert.equal(updates.length, 0);
+    }
 });
 
 test('repository configuration sync stops before writing when the current tree is truncated', async t => {
@@ -310,6 +349,7 @@ test('repository configuration sync stops before writing when the current tree i
     t.mock.method(console, 'error', () => {});
     const response = await worker.fetch(adminRequest('/repository-config', { method: 'POST' }), env, ctx);
     assert.equal(response.status, 502);
+    assert.match((await response.json()).error, /tree is truncated/);
     assert.deepEqual([trees.length, commits.length, updates.length], [0, 0, 0]);
 });
 

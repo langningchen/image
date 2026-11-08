@@ -3,6 +3,35 @@ import { IMAGE_PATH_PATTERN } from '../constants.ts';
 import { retentionMs } from '../config.ts';
 const GITHUB_API_VERSION = '2022-11-28';
 
+export class GithubApiError extends Error {
+    operation: string;
+    status: number;
+    requestId: string | null;
+
+    constructor(operation: string, status: number, detail: string, requestId: string | null) {
+        super(`${operation} failed (GitHub HTTP ${status}): ${detail}`);
+        this.name = 'GithubApiError';
+        this.operation = operation;
+        this.status = status;
+        this.requestId = requestId;
+    }
+}
+
+async function githubApiError(response: Response, operation: string): Promise<GithubApiError> {
+    const body = await response.text();
+    let detail = body;
+    try {
+        const parsed = JSON.parse(body) as { message?: unknown; errors?: unknown[] };
+        const messages = typeof parsed.message === 'string' ? [parsed.message] : [];
+        for (const error of parsed.errors ?? []) {
+            if (typeof error === 'string') messages.push(error);
+            else if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') messages.push(error.message);
+        }
+        if (messages.length) detail = messages.join('; ');
+    } catch { /* Non-JSON errors still carry useful HTTP diagnostics. */ }
+    return new GithubApiError(operation, response.status, detail || response.statusText, response.headers.get('X-GitHub-Request-Id'));
+}
+
 export interface GithubContentResponse {
     sha?: string;
     content?: {
@@ -106,33 +135,33 @@ export async function commitGithubChanges(
     changes: (tree: GithubTreeResponse) => GithubTreeChange[],
     message: (count: number) => string,
 ): Promise<number> {
-    async function request<T>(path: string, body?: unknown): Promise<T> {
+    async function request<T>(path: string, operation: string, body?: unknown): Promise<T> {
         const response = await fetch(githubApiUrl(env, path), {
             method: body === undefined ? 'GET' : 'POST',
             headers: { ...githubHeaders(env), 'Content-Type': 'application/json' },
             body: body === undefined ? undefined : JSON.stringify(body),
         });
-        if (!response.ok) throw new Error(`GitHub ${path} failed: ${response.status} ${await response.text()}`);
+        if (!response.ok) throw await githubApiError(response, operation);
         return await response.json() as T;
     }
-    const repository = await request<{ default_branch: string }>('');
+    const repository = await request<{ default_branch: string }>('', 'Read repository');
     if (!repository.default_branch) throw new Error('GitHub did not return a default branch');
     const branch = repository.default_branch.split('/').map(encodeURIComponent).join('/');
     for (let attempt = 0; attempt < 3; attempt++) {
-        const ref = await request<{ object: { sha: string } }>(`/git/ref/heads/${branch}`);
+        const ref = await request<{ object: { sha: string } }>(`/git/ref/heads/${branch}`, 'Read default branch');
         if (!ref.object?.sha) throw new Error('GitHub did not return the branch SHA');
-        const parent = await request<{ tree: { sha: string } }>(`/git/commits/${ref.object.sha}`);
+        const parent = await request<{ tree: { sha: string } }>(`/git/commits/${ref.object.sha}`, 'Read parent commit');
         if (!parent.tree?.sha) throw new Error('GitHub did not return the base tree SHA');
-        const currentTree = await request<GithubTreeResponse>(`/git/trees/${parent.tree.sha}?recursive=1`);
+        const currentTree = await request<GithubTreeResponse>(`/git/trees/${parent.tree.sha}?recursive=1`, 'Read repository tree');
         if (currentTree.truncated) throw new Error('Target repository tree is truncated; repository update stopped.');
         const entries = changes(currentTree);
         if (!entries.length) return 0;
-        const tree = await request<{ sha: string }>('/git/trees', {
+        const tree = await request<{ sha: string }>('/git/trees', 'Create repository tree', {
             base_tree: parent.tree.sha,
             tree: entries,
         });
         if (!tree.sha) throw new Error('GitHub did not return the updated tree SHA');
-        const commit = await request<{ sha: string }>('/git/commits', {
+        const commit = await request<{ sha: string }>('/git/commits', 'Create commit', {
             message: message(entries.length),
             tree: tree.sha,
             parents: [ref.object.sha],
@@ -146,7 +175,7 @@ export async function commitGithubChanges(
         if (updated.ok) return entries.length;
         // Rebuild from the latest tree when another writer advances the branch.
         if ((updated.status === 409 || updated.status === 422) && attempt < 2) continue;
-        throw new Error(`Could not publish repository changes: ${updated.status} ${await updated.text()}`);
+        throw await githubApiError(updated, 'Update default branch');
     }
     throw new Error('Could not publish repository changes after retries');
 }
