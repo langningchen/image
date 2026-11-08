@@ -43,9 +43,11 @@ test('daily history cleanup selects deleted root-level images and preserves re-a
     const directory = mkdtempSync(join(tmpdir(), 'image-history-test-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const selected = [`${'d1'.repeat(16)}.png`, `${'a1'.repeat(16)}.jpeg`, `${'0'.repeat(32)}.png`, `${'b2'.repeat(16)}.webp`];
+    selected.push(...Array.from({ length: 2500 }, (_, index) => `${(index + 1).toString(36).padStart(32, '0')}.png`));
     const kept = `${'e1'.repeat(16)}.png`;
     const logPath = join(directory, 'deletions.txt');
     const argsPath = join(directory, 'filter-args.json');
+    const callsPath = join(directory, 'git-calls.json');
     writeFileSync(logPath, [
         ...selected, selected[0], kept,
         `nested/${selected[0]}`, `${'A'.repeat(32)}.png`, `${'a'.repeat(31)}.jpeg`, 'README.md',
@@ -55,15 +57,22 @@ test('daily history cleanup selects deleted root-level images and preserves re-a
     writeFileSync(join(directory, 'git'), `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+const calls = fs.existsSync(process.env.IMAGE_TEST_GIT_CALLS) ? JSON.parse(fs.readFileSync(process.env.IMAGE_TEST_GIT_CALLS)) : [];
+calls.push(args[0]);
+fs.writeFileSync(process.env.IMAGE_TEST_GIT_CALLS, JSON.stringify(calls));
 if (args[0] === 'log') process.stdout.write(fs.readFileSync(process.env.IMAGE_TEST_GIT_LOG));
-else if (args[0] === 'cat-file') process.exit(args[2] === 'HEAD:' + process.env.IMAGE_TEST_KEPT_PATH ? 0 : 1);
-else if (args[0] === 'filter-repo') fs.writeFileSync(process.env.IMAGE_TEST_GIT_ARGS, JSON.stringify(args));
+else if (args[0] === 'ls-tree') process.stdout.write(process.env.IMAGE_TEST_KEPT_PATH + String.fromCharCode(10));
+else if (args[0] === 'filter-repo') fs.writeFileSync(process.env.IMAGE_TEST_GIT_ARGS, JSON.stringify({ args, paths: fs.readFileSync(args[args.indexOf('--paths-from-file') + 1], 'utf8') }));
 else process.exit(99);
 `, { mode: 0o755 });
     execFileSync('bash', [fileURLToPath(new URL('../target-repository/scripts/purge-deleted-image-history.sh', import.meta.url))], {
         cwd: directory,
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, IMAGE_TEST_KEPT_PATH: kept, IMAGE_TEST_GIT_LOG: logPath, IMAGE_TEST_GIT_ARGS: argsPath },
+        timeout: 10000,
+        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, IMAGE_TEST_KEPT_PATH: kept, IMAGE_TEST_GIT_LOG: logPath, IMAGE_TEST_GIT_ARGS: argsPath, IMAGE_TEST_GIT_CALLS: callsPath },
     });
-    const args = JSON.parse(readFileSync(argsPath, 'utf8'));
-    assert.deepEqual(args, ['filter-repo', '--force', '--invert-paths', ...selected.sort().flatMap(path => ['--path', path])]);
+    const result = JSON.parse(readFileSync(argsPath, 'utf8'));
+    assert.deepEqual(result.args.slice(0, 4), ['filter-repo', '--force', '--invert-paths', '--paths-from-file']);
+    assert.equal(result.args.length, 5);
+    assert.deepEqual(result.paths.trim().split('\n'), selected.sort());
+    assert.deepEqual(JSON.parse(readFileSync(callsPath, 'utf8')), ['log', 'ls-tree', 'filter-repo']);
 });
